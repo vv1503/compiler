@@ -44,9 +44,7 @@ from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
 from translations import Translator
 
 
-# ======================================
 # Нумерация строк
-# ======================================
 class LineNumberArea(QWidget):
     def __init__(self, editor):
         super().__init__(editor)
@@ -169,9 +167,7 @@ class SimpleSyntaxHighlighter(QSyntaxHighlighter):
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
 
 
-# ======================================
-# Окно справки (твоя версия сохранена полностью)
-# ======================================
+# Окно справки 
 class HelpWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent) 
@@ -324,9 +320,7 @@ class HelpWindow(QDialog):
                 self.content.clear()
 
 
-# ======================================
 # Главное окно
-# ======================================
 class Compiler(QMainWindow):
     def __init__(self):
         super().__init__()
@@ -383,7 +377,6 @@ class Compiler(QMainWindow):
         self.splitter = QSplitter(Qt.Orientation.Vertical)
         layout.addWidget(self.splitter)
 
-        # Важно: используем CodeEditor, а не QTextEdit
         self.editor = CodeEditor()
         highlighter = SimpleSyntaxHighlighter(self.editor.document())  # ← подсветка подключается здесь
         self.splitter.addWidget(self.editor)
@@ -562,7 +555,6 @@ class Compiler(QMainWindow):
         self.translator.set_language(lang)
         self.retranslate_ui()
 
-        # Фикс поломки шапки при смене языка
         self.setWindowTitle("")
         QApplication.processEvents()
         self.update_window_title()
