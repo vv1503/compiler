@@ -37,11 +37,13 @@ from PyQt6.QtGui import (
     QColor,
     QPainter,
     QTextFormat,
-    QSyntaxHighlighter  
+    QSyntaxHighlighter,
+    QTextCursor  
 )
 
 from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
 from translations import Translator
+from lexical_analyzer import LexicalAnalyzer
 
 
 # Нумерация строк
@@ -334,7 +336,7 @@ class Compiler(QMainWindow):
         self.current_file = None
         self.text_modified = False
         self.current_encoding = "UTF-8"
-        self.insert_mode = True  # True = Вставка, False = Замена
+        self.insert_mode = True 
 
         # Статусная строка
         self.statusBar = QStatusBar()
@@ -378,7 +380,7 @@ class Compiler(QMainWindow):
         layout.addWidget(self.splitter)
 
         self.editor = CodeEditor()
-        highlighter = SimpleSyntaxHighlighter(self.editor.document())  # ← подсветка подключается здесь
+        highlighter = SimpleSyntaxHighlighter(self.editor.document())
         self.splitter.addWidget(self.editor)
 
         # Область результатов
@@ -386,22 +388,49 @@ class Compiler(QMainWindow):
         results_layout = QVBoxLayout(self.results_widget)
         self.results_tabs = QTabWidget()
 
-        self.output = QTextEdit()
-        self.output.setReadOnly(True)
-        self.output.setFont(QFont("Consolas", 11))
-        self.results_tabs.addTab(self.output, self.tr("Результаты"))
+        self.tokens_table = QTableWidget()
+        self.tokens_table.setColumnCount(4)
+        self.tokens_table.setHorizontalHeaderLabels([
+            self.tr("Условный код"),
+            self.tr("Тип лексемы"),
+            self.tr("Лексема"),
+            self.tr("Местоположение")
+        ])
+        self.tokens_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
+        self.tokens_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.results_tabs.addTab(self.tokens_table, self.tr("Лексемы"))
 
         self.errors_table = QTableWidget()
         self.errors_table.setColumnCount(3)
-        self.errors_table.setHorizontalHeaderLabels([self.tr("Строка"), self.tr("Позиция"), self.tr("Сообщение")])
+        self.errors_table.setHorizontalHeaderLabels([
+            self.tr("Строка"), self.tr("Позиция"), self.tr("Сообщение")
+        ])
         self.errors_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.errors_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
         self.results_tabs.addTab(self.errors_table, self.tr("Ошибки"))
 
         results_layout.addWidget(self.results_tabs)
         self.splitter.addWidget(self.results_widget)
-
         self.splitter.setSizes([550, 200])
+
+    def go_to_error(self, item):
+        if not item:
+            return
+        row = item.row()
+        try:
+            line = int(self.errors_table.item(row, 0).text())
+            col = int(self.errors_table.item(row, 1).text())
+        except (ValueError, TypeError, AttributeError):
+            return
+
+        cursor = self.editor.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        for _ in range(line - 1):
+            cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+        cursor.movePosition(QTextCursor.MoveOperation.NextCharacter,
+                            QTextCursor.MoveMode.MoveAnchor, col - 1)
+        self.editor.setTextCursor(cursor)
+        self.editor.setFocus()
 
     def create_actions(self):
         self.act_new = QAction(self.tr("Создать"), self)
@@ -589,6 +618,19 @@ class Compiler(QMainWindow):
         self.act_lang_ru.setText(self.tr("Русский"))
         self.act_lang_en.setText(self.tr("English"))
 
+        self.results_tabs.setTabText(0, self.tr("Лексемы"))
+        self.results_tabs.setTabText(1, self.tr("Ошибки"))
+
+        self.tokens_table.setHorizontalHeaderLabels([
+            self.tr("Условный код"),
+            self.tr("Тип лексемы"),
+            self.tr("Лексема"),
+            self.tr("Местоположение")
+        ])
+        self.errors_table.setHorizontalHeaderLabels([
+            self.tr("Строка"), self.tr("Позиция"), self.tr("Сообщение")
+        ])
+
         self.results_tabs.setTabText(0, self.tr("Результаты"))
         self.results_tabs.setTabText(1, self.tr("Ошибки"))
         self.errors_table.setHorizontalHeaderLabels([
@@ -699,25 +741,37 @@ class Compiler(QMainWindow):
             event.ignore()
 
     def run_analyzer(self):
-        self.output.clear()
+        self.tokens_table.setRowCount(0)
         self.errors_table.setRowCount(0)
 
-        text = self.editor.toPlainText().strip()
-        if not text:
-            self.output.append(self.tr("Текст пустой"))
-            self.statusBar.showMessage(self.tr("Анализ не выполнен"))
+        text = self.editor.toPlainText()
+        if not text.strip():
+            self.statusBar.showMessage(self.tr("Текст пустой"))
             return
 
-        self.output.append("Запуск анализатора...")
-        self.output.append(f"{self.tr('Длина текста')}: {len(text)} {self.tr('символов')}")
-        self.output.append("\n" + self.tr("Анализ завершён"))
+        scanner = LexicalAnalyzer()
+        tokens, errors = scanner.analyze(text)
 
-        # Демо-ошибки
-        self.add_error(5, 3, self.tr("Ожидался символ ';' после выражения"))
-        self.add_error(8, 1, self.tr("Неизвестный идентификатор 'addd'"))
-        self.add_error(12, 10, self.tr("Несоответствие типов"))
+        # Заполнение таблиц лексем и ошибок
+        for t in tokens:
+            row = self.tokens_table.rowCount()
+            self.tokens_table.insertRow(row)
+            self.tokens_table.setItem(row, 0, QTableWidgetItem(str(t['code'])))
+            self.tokens_table.setItem(row, 1, QTableWidgetItem(t['type']))
+            self.tokens_table.setItem(row, 2, QTableWidgetItem(t['lexeme']))
+            self.tokens_table.setItem(row, 3, QTableWidgetItem(t['location']))
+
+        for line, col, msg in errors:
+            row = self.errors_table.rowCount()
+            self.errors_table.insertRow(row)
+            self.errors_table.setItem(row, 0, QTableWidgetItem(str(line)))
+            self.errors_table.setItem(row, 1, QTableWidgetItem(str(col)))
+            self.errors_table.setItem(row, 2, QTableWidgetItem(msg))
 
         self.statusBar.showMessage(self.tr("Анализ завершён"))
+
+        if errors:
+            self.results_tabs.setCurrentIndex(1)  
 
     def add_error(self, line: int, col: int, message: str):
         row = self.errors_table.rowCount()
