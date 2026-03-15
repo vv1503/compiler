@@ -1,5 +1,6 @@
 import sys
 import os
+import subprocess
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -749,29 +750,47 @@ class Compiler(QMainWindow):
             self.statusBar.showMessage(self.tr("Текст пустой"))
             return
 
-        scanner = LexicalAnalyzer()
-        tokens, errors = scanner.analyze(text)
+        try:
+            proc = subprocess.run(
+                ["C:\\Users\\User\\Desktop\\compiler\\app\\parser.exe"],           
+                input=(text + '\n').encode("utf-8"),
+                capture_output=True,
+                timeout=5
+            )
 
-        # Заполнение таблиц лексем и ошибок
-        for t in tokens:
-            row = self.tokens_table.rowCount()
-            self.tokens_table.insertRow(row)
-            self.tokens_table.setItem(row, 0, QTableWidgetItem(str(t['code'])))
-            self.tokens_table.setItem(row, 1, QTableWidgetItem(t['type']))
-            self.tokens_table.setItem(row, 2, QTableWidgetItem(t['lexeme']))
-            self.tokens_table.setItem(row, 3, QTableWidgetItem(t['location']))
+            stdout = proc.stdout.decode("utf-8", errors="ignore")
+            stderr = proc.stderr.decode("utf-8", errors="ignore")
 
-        for line, col, msg in errors:
-            row = self.errors_table.rowCount()
-            self.errors_table.insertRow(row)
-            self.errors_table.setItem(row, 0, QTableWidgetItem(str(line)))
-            self.errors_table.setItem(row, 1, QTableWidgetItem(str(col)))
-            self.errors_table.setItem(row, 2, QTableWidgetItem(msg))
+            # Заполняем таблицу лексем 
+            for line in stdout.strip().split("\n"):
+                if "\t" in line and not line.startswith("Parse"):
+                    parts = line.split("\t")
+                    if len(parts) >= 4:
+                        row = self.tokens_table.rowCount()
+                        self.tokens_table.insertRow(row)
+                        self.tokens_table.setItem(row, 0, QTableWidgetItem(parts[0]))
+                        self.tokens_table.setItem(row, 1, QTableWidgetItem(parts[1]))
+                        self.tokens_table.setItem(row, 2, QTableWidgetItem(parts[2]))
+                        self.tokens_table.setItem(row, 3, QTableWidgetItem(parts[3]))
 
-        self.statusBar.showMessage(self.tr("Анализ завершён"))
+            # Ошибки 
+            if "Syntax error" in stderr or "Недопустимый символ" in stderr or proc.returncode != 0:
+                for err in stderr.strip().split("\n"):
+                    if err.strip():
+                        row = self.errors_table.rowCount()
+                        self.errors_table.insertRow(row)
+                        self.errors_table.setItem(row, 0, QTableWidgetItem("1"))
+                        self.errors_table.setItem(row, 1, QTableWidgetItem("1"))
+                        self.errors_table.setItem(row, 2, QTableWidgetItem(err))
+                self.statusBar.showMessage("Синтаксическая ошибка")
+                self.results_tabs.setCurrentIndex(1)  # переключаемся на вкладку "Ошибки"
+            else:
+                self.statusBar.showMessage(self.tr("Анализ завершён (синтаксис OK)"))
 
-        if errors:
-            self.results_tabs.setCurrentIndex(1)  
+        except FileNotFoundError:
+            QMessageBox.critical(self, "Ошибка", "Не найден parser.exe!\nСкомпилируйте парсер в папке parser/")
+        except Exception as e:
+            QMessageBox.warning(self, "Ошибка", f"Не удалось запустить парсер:\n{e}")
 
     def add_error(self, line: int, col: int, message: str):
         row = self.errors_table.rowCount()
