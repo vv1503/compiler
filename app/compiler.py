@@ -44,8 +44,7 @@ from PyQt6.QtGui import (
 
 from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
 from translations import Translator
-from lexical_analyzer import LexicalAnalyzer
-from syntax_parser import SyntaxParser
+from antlr_bridge import antlr_analyze
 
 
 # Нумерация строк
@@ -298,7 +297,7 @@ class HelpWindow(QDialog):
         limits.setData(0, Qt.ItemDataRole.UserRole, f"""
         <h2>{tr("Ограничения текущей версии")}</h2>
         <ul>
-            <li>{tr("Грамматика: объявления const/var с числовым литералом.")}</li>
+            <li>{tr("grammar_antlr_note")}</li>
             <li>{tr("Подсветка синтаксиса присутствует, но базовая.")}</li>
             <li>{tr("Работа с несколькими вкладками реализована.")}</li>
             <li>{tr("Поддерживается только .txt.")}</li>
@@ -464,6 +463,7 @@ class Compiler(QMainWindow):
         self.editor.centerCursor()
 
     def _parse_location_cell(self, loc: str):
+        """Парсит строку вида «строка 1, позиция 9» или «line 1, position 9»."""
         m = re.search(r"строка\s+(\d+).*?позици[яи]\s+(\d+)", loc, re.IGNORECASE)
         if m:
             return int(m.group(1)), int(m.group(2))
@@ -804,8 +804,7 @@ class Compiler(QMainWindow):
             self.statusBar.showMessage(self.tr("Текст пустой"))
             return
 
-        scanner = LexicalAnalyzer()
-        tokens, lex_errors = scanner.analyze(text)
+        tokens, lex_errors, syn_errors = antlr_analyze(text)
 
         for t in tokens:
             row = self.tokens_table.rowCount()
@@ -815,9 +814,6 @@ class Compiler(QMainWindow):
             self.tokens_table.setItem(row, 2, QTableWidgetItem(self._tr_lexeme(t["lexeme"])))
             loc = self.tr("token_loc_fmt").format(t["line"], t["col"], t["end_col"])
             self.tokens_table.setItem(row, 3, QTableWidgetItem(loc))
-
-        parser = SyntaxParser(tokens)
-        syn_errors = parser.parse()
 
         all_errors = list(lex_errors) + list(syn_errors)
         for err in all_errors:
@@ -859,6 +855,8 @@ class Compiler(QMainWindow):
             return self.tr("syn_err_numeric_literal")
         if key == "lex_err_bad_char":
             return self.tr("lex_err_bad_char").format(args[0])
+        if key in ("antlr_lexer_err", "antlr_parse_err"):
+            return self.tr(key).format(args[0])
         if args:
             return self.tr(key).format(*args)
         return self.tr(key)

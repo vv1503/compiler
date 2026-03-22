@@ -83,6 +83,7 @@ class Translator:
                 "Предназначен для запуска лексического и синтаксического анализа текста.": "Предназначен для запуска лексического и синтаксического анализа текста.",
                 "При ошибках используется нейтрализация методом Айронса.": "При ошибках используется нейтрализация методом Айронса.",
                 "Грамматика: объявления const/var с числовым литералом.": "Грамматика: объявления const/var с числовым литералом.",
+                "grammar_antlr_note": "Грамматика описана в MiniR.g4; лексер и парсер сгенерированы ANTLR4 и встроены в приложение.",
                 "Справка - Руководство пользователя - Compiler": "Справка - Руководство пользователя - Compiler",
                 "Разделы справки": "Разделы справки",
                 "Общая информация": "Общая информация",
@@ -176,6 +177,8 @@ class Translator:
                 "ctx_after_expr": "после выражения",
                 "ctx_after_var": "после var",
                 "ctx_after_var_name": "после имени переменной",
+                "antlr_lexer_err": "Лексер ANTLR: {0}",
+                "antlr_parse_err": "Парсер ANTLR: {0}",
             },
             "en": {
                 "Compiler": "Compiler",
@@ -258,6 +261,7 @@ class Translator:
                 "Предназначен для запуска лексического и синтаксического анализа текста.": "Runs lexical and syntax analysis of the text.",
                 "При ошибках используется нейтрализация методом Айронса.": "On errors, Irons-style recovery is used.",
                 "Грамматика: объявления const/var с числовым литералом.": "Grammar: const/var declarations, R-style for loops (for (i in m:n) { … }), and print(...).",
+                "grammar_antlr_note": "Grammar is defined in MiniR.g4; lexer and parser are generated with ANTLR4 and embedded in the app.",
                 "Справка - Руководство пользователя - Compiler": "Help — User Guide — Compiler",
                 "Разделы справки": "Help topics",
                 "Общая информация": "General information",
@@ -351,6 +355,8 @@ class Translator:
                 "ctx_after_expr": "after the expression",
                 "ctx_after_var": "after var",
                 "ctx_after_var_name": "after the variable name",
+                "antlr_lexer_err": "ANTLR lexer: {0}",
+                "antlr_parse_err": "ANTLR parser: {0}",
             }
         }
 
