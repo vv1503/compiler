@@ -1,6 +1,6 @@
 import sys
 import os
-import subprocess
+import re
 
 from PyQt6.QtWidgets import (
     QApplication,
@@ -45,6 +45,7 @@ from PyQt6.QtGui import (
 from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
 from translations import Translator
 from lexical_analyzer import LexicalAnalyzer
+from syntax_parser import SyntaxParser
 
 
 # Нумерация строк
@@ -281,9 +282,9 @@ class HelpWindow(QDialog):
         run = QTreeWidgetItem([f"{tr('Запустить анализатор')} (F5)"])
         run.setData(0, Qt.ItemDataRole.UserRole, f"""
         <h2>{tr('Запустить анализатор')}</h2>
-        <p>{tr('Предназначен для запуска синтаксического анализа текста.')}</p>
+        <p>{tr('Предназначен для запуска лексического и синтаксического анализа текста.')}</p>
         <p>{tr('Результаты анализа выводятся в нижней области окна.')}</p>
-        <p>{tr('В текущей лабораторной работе анализатор реализован как заглушка.')}</p>
+        <p>{tr('При ошибках используется нейтрализация методом Айронса.')}</p>
         """)
         run_menu.addChild(run)
 
@@ -297,7 +298,7 @@ class HelpWindow(QDialog):
         limits.setData(0, Qt.ItemDataRole.UserRole, f"""
         <h2>{tr("Ограничения текущей версии")}</h2>
         <ul>
-            <li>{tr("Синтаксический анализатор не реализован.")}</li>
+            <li>{tr("Грамматика: объявления const/var с числовым литералом.")}</li>
             <li>{tr("Подсветка синтаксиса присутствует, но базовая.")}</li>
             <li>{tr("Работа с несколькими вкладками реализована.")}</li>
             <li>{tr("Поддерживается только .txt.")}</li>
@@ -404,34 +405,72 @@ class Compiler(QMainWindow):
         self.errors_table = QTableWidget()
         self.errors_table.setColumnCount(3)
         self.errors_table.setHorizontalHeaderLabels([
-            self.tr("Строка"), self.tr("Позиция"), self.tr("Сообщение")
+            self.tr("Неверный фрагмент"),
+            self.tr("Местоположение"),
+            self.tr("Описание"),
         ])
+        self.errors_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        self.errors_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
         self.errors_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
         self.errors_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.errors_table.cellClicked.connect(self.go_to_error)
         self.results_tabs.addTab(self.errors_table, self.tr("Ошибки"))
 
+        self.syntax_error_count_label = QLabel()
+        self.syntax_error_count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.syntax_status_label = QLabel()
+        self.syntax_status_label.setWordWrap(True)
+
+        results_layout.addWidget(self.syntax_status_label)
         results_layout.addWidget(self.results_tabs)
+        results_layout.addWidget(self.syntax_error_count_label)
         self.splitter.addWidget(self.results_widget)
         self.splitter.setSizes([550, 200])
 
-    def go_to_error(self, item):
+    def go_to_error(self, row, column):
+        item = self.errors_table.item(row, 0)
         if not item:
             return
-        row = item.row()
-        try:
-            line = int(self.errors_table.item(row, 0).text())
-            col = int(self.errors_table.item(row, 1).text())
-        except (ValueError, TypeError, AttributeError):
-            return
+        data = item.data(Qt.ItemDataRole.UserRole)
+        if isinstance(data, (list, tuple)) and len(data) >= 3:
+            line, col, frag_len = int(data[0]), int(data[1]), int(data[2])
+        else:
+            try:
+                loc = self.errors_table.item(row, 1).text()
+                line, col = self._parse_location_cell(loc)
+                frag_len = 1
+            except (ValueError, TypeError, AttributeError):
+                return
 
         cursor = self.editor.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.Start)
         for _ in range(line - 1):
             cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
-        cursor.movePosition(QTextCursor.MoveOperation.NextCharacter,
-                            QTextCursor.MoveMode.MoveAnchor, col - 1)
+        cursor.movePosition(
+            QTextCursor.MoveOperation.Right,
+            QTextCursor.MoveMode.MoveAnchor,
+            col - 1,
+        )
+        if frag_len > 0:
+            cursor.movePosition(
+                QTextCursor.MoveOperation.Right,
+                QTextCursor.MoveMode.KeepAnchor,
+                frag_len,
+            )
+
         self.editor.setTextCursor(cursor)
         self.editor.setFocus()
+        self.editor.centerCursor()
+
+    def _parse_location_cell(self, loc: str):
+        m = re.search(r"строка\s+(\d+).*?позици[яи]\s+(\d+)", loc, re.IGNORECASE)
+        if m:
+            return int(m.group(1)), int(m.group(2))
+        m2 = re.search(r"line\s+(\d+).*?position\s+(\d+)", loc, re.IGNORECASE)
+        if m2:
+            return int(m2.group(1)), int(m2.group(2))
+        return 1, 1
 
     def create_actions(self):
         self.act_new = QAction(self.tr("Создать"), self)
@@ -554,32 +593,35 @@ class Compiler(QMainWindow):
         self.menu_help.addAction(self.act_about)
 
     def create_toolbar(self):
-        tb = QToolBar("Панель инструментов")
+        tb = QToolBar(self.tr("Панель инструментов"))
         self.addToolBar(tb)
+        self.main_toolbar = tb
         tb.setIconSize(QSize(28, 28))
 
         style = self.style()
         pix = QStyle.StandardPixmap
 
         items = [
-            (pix.SP_MediaPlay,          self.tr("Пуск анализатора"),      self.run_analyzer),
-            (pix.SP_FileIcon,           self.tr("Создать"),               self.new_file),
-            (pix.SP_DirOpenIcon,        self.tr("Открыть"),               self.open_file),
-            (pix.SP_DialogSaveButton,   self.tr("Сохранить"),             self.save_file),
-            (pix.SP_ArrowBack,          self.tr("Отменить"),              self.editor.undo),
-            (pix.SP_ArrowForward,       self.tr("Повторить"),             self.editor.redo),
-            (pix.SP_DialogCancelButton, self.tr("Вырезать"),              self.editor.cut),
-            (pix.SP_DriveFDIcon,        self.tr("Копировать"),            self.editor.copy),
-            (pix.SP_DialogOkButton,     self.tr("Вставить"),              self.editor.paste),
-            (pix.SP_MessageBoxQuestion, self.tr("Справка"),               self.show_help),
-            (pix.SP_MessageBoxInformation, self.tr("О программе"),     self.show_about),
+            (pix.SP_MediaPlay,          "Пуск анализатора",      self.run_analyzer),
+            (pix.SP_FileIcon,           "Создать",               self.new_file),
+            (pix.SP_DirOpenIcon,        "Открыть",               self.open_file),
+            (pix.SP_DialogSaveButton,   "Сохранить",             self.save_file),
+            (pix.SP_ArrowBack,          "Отменить",              self.editor.undo),
+            (pix.SP_ArrowForward,       "Повторить",             self.editor.redo),
+            (pix.SP_DialogCancelButton, "Вырезать",              self.editor.cut),
+            (pix.SP_DriveFDIcon,        "Копировать",            self.editor.copy),
+            (pix.SP_DialogOkButton,     "Вставить",              self.editor.paste),
+            (pix.SP_MessageBoxQuestion, "Справка",               self.show_help),
+            (pix.SP_MessageBoxInformation, "О программе",     self.show_about),
         ]
 
-        for icon_enum, tooltip, func in items:
+        self.toolbar_actions = []
+        for icon_enum, tip_key, func in items:
             icon = style.standardIcon(icon_enum)
-            act = QAction(icon, tooltip, self)
+            act = QAction(icon, self.tr(tip_key), self)
             act.triggered.connect(func)
             tb.addAction(act)
+            self.toolbar_actions.append((act, tip_key))
 
     def change_language(self, lang):
         self.translator.set_language(lang)
@@ -614,10 +656,22 @@ class Compiler(QMainWindow):
         self.act_delete.setText(self.tr("Удалить"))
         self.act_select_all.setText(self.tr("Выделить все"))
         self.act_run.setText(self.tr("Пуск"))
+        self.act_task.setText(self.tr("Постановка задачи"))
+        self.act_grammar.setText(self.tr("Грамматика"))
+        self.act_classify.setText(self.tr("Классификация грамматики"))
+        self.act_method.setText(self.tr("Метод анализа"))
+        self.act_example.setText(self.tr("Тестовый пример"))
+        self.act_refs.setText(self.tr("Список литературы"))
+        self.act_source.setText(self.tr("Исходный код программы"))
         self.act_help.setText(self.tr("Вызов справки"))
         self.act_about.setText(self.tr("О программе"))
         self.act_lang_ru.setText(self.tr("Русский"))
         self.act_lang_en.setText(self.tr("English"))
+
+        if getattr(self, "main_toolbar", None):
+            self.main_toolbar.setWindowTitle(self.tr("Панель инструментов"))
+        for act, tip_key in getattr(self, "toolbar_actions", []):
+            act.setToolTip(self.tr(tip_key))
 
         self.results_tabs.setTabText(0, self.tr("Лексемы"))
         self.results_tabs.setTabText(1, self.tr("Ошибки"))
@@ -626,18 +680,12 @@ class Compiler(QMainWindow):
             self.tr("Условный код"),
             self.tr("Тип лексемы"),
             self.tr("Лексема"),
-            self.tr("Местоположение")
+            self.tr("Местоположение"),
         ])
         self.errors_table.setHorizontalHeaderLabels([
-            self.tr("Строка"), self.tr("Позиция"), self.tr("Сообщение")
-        ])
-
-        self.results_tabs.setTabText(0, self.tr("Результаты"))
-        self.results_tabs.setTabText(1, self.tr("Ошибки"))
-        self.errors_table.setHorizontalHeaderLabels([
-            self.tr("Строка"),
-            self.tr("Позиция"),
-            self.tr("Сообщение")
+            self.tr("Неверный фрагмент"),
+            self.tr("Местоположение"),
+            self.tr("Описание"),
         ])
 
         self.statusBar.showMessage(self.tr("Готово") if not self.text_modified else self.tr("Изменено"))
@@ -702,7 +750,9 @@ class Compiler(QMainWindow):
     def open_file(self):
         if not self.maybe_save():
             return
-        fname, _ = QFileDialog.getOpenFileName(self, self.tr("Открыть"), "", "Text files (*.txt);;All files (*.*)")
+        fname, _ = QFileDialog.getOpenFileName(
+            self, self.tr("Открыть"), "", self.tr("file_filter_txt")
+        )
         if fname:
             try:
                 with open(fname, encoding='utf-8') as f:
@@ -729,7 +779,9 @@ class Compiler(QMainWindow):
             return False
 
     def save_as_file(self) -> bool:
-        fname, _ = QFileDialog.getSaveFileName(self, self.tr("Сохранить как"), "", "Text files (*.txt);;All files (*.*)")
+        fname, _ = QFileDialog.getSaveFileName(
+            self, self.tr("Сохранить как"), "", self.tr("file_filter_txt")
+        )
         if fname:
             self.current_file = fname
             return self.save_file()
@@ -744,60 +796,101 @@ class Compiler(QMainWindow):
     def run_analyzer(self):
         self.tokens_table.setRowCount(0)
         self.errors_table.setRowCount(0)
+        self.syntax_status_label.clear()
+        self.syntax_error_count_label.clear()
 
         text = self.editor.toPlainText()
         if not text.strip():
             self.statusBar.showMessage(self.tr("Текст пустой"))
             return
 
-        try:
-            proc = subprocess.run(
-                ["C:\\Users\\User\\Desktop\\compiler\\app\\parser.exe"],           
-                input=(text + '\n').encode("utf-8"),
-                capture_output=True,
-                timeout=5
-            )
+        scanner = LexicalAnalyzer()
+        tokens, lex_errors = scanner.analyze(text)
 
-            stdout = proc.stdout.decode("utf-8", errors="ignore")
-            stderr = proc.stderr.decode("utf-8", errors="ignore")
+        for t in tokens:
+            row = self.tokens_table.rowCount()
+            self.tokens_table.insertRow(row)
+            self.tokens_table.setItem(row, 0, QTableWidgetItem(str(t["code"])))
+            self.tokens_table.setItem(row, 1, QTableWidgetItem(self.tr(t["type"])))
+            self.tokens_table.setItem(row, 2, QTableWidgetItem(self._tr_lexeme(t["lexeme"])))
+            loc = self.tr("token_loc_fmt").format(t["line"], t["col"], t["end_col"])
+            self.tokens_table.setItem(row, 3, QTableWidgetItem(loc))
 
-            # Заполняем таблицу лексем 
-            for line in stdout.strip().split("\n"):
-                if "\t" in line and not line.startswith("Parse"):
-                    parts = line.split("\t")
-                    if len(parts) >= 4:
-                        row = self.tokens_table.rowCount()
-                        self.tokens_table.insertRow(row)
-                        self.tokens_table.setItem(row, 0, QTableWidgetItem(parts[0]))
-                        self.tokens_table.setItem(row, 1, QTableWidgetItem(parts[1]))
-                        self.tokens_table.setItem(row, 2, QTableWidgetItem(parts[2]))
-                        self.tokens_table.setItem(row, 3, QTableWidgetItem(parts[3]))
+        parser = SyntaxParser(tokens)
+        syn_errors = parser.parse()
 
-            # Ошибки 
-            if "Syntax error" in stderr or "Недопустимый символ" in stderr or proc.returncode != 0:
-                for err in stderr.strip().split("\n"):
-                    if err.strip():
-                        row = self.errors_table.rowCount()
-                        self.errors_table.insertRow(row)
-                        self.errors_table.setItem(row, 0, QTableWidgetItem("1"))
-                        self.errors_table.setItem(row, 1, QTableWidgetItem("1"))
-                        self.errors_table.setItem(row, 2, QTableWidgetItem(err))
-                self.statusBar.showMessage("Синтаксическая ошибка")
-                self.results_tabs.setCurrentIndex(1)  # переключаемся на вкладку "Ошибки"
-            else:
-                self.statusBar.showMessage(self.tr("Анализ завершён (синтаксис OK)"))
+        all_errors = list(lex_errors) + list(syn_errors)
+        for err in all_errors:
+            self._append_syntax_error_row(err)
 
-        except FileNotFoundError:
-            QMessageBox.critical(self, "Ошибка", "Не найден parser.exe!\nСкомпилируйте парсер в папке parser/")
-        except Exception as e:
-            QMessageBox.warning(self, "Ошибка", f"Не удалось запустить парсер:\n{e}")
+        n_err = len(all_errors)
+        self.syntax_error_count_label.setText(
+            self.tr("Общее количество ошибок:") + f" {n_err}"
+        )
 
-    def add_error(self, line: int, col: int, message: str):
+        if n_err == 0:
+            self.syntax_status_label.setText(self.tr("Синтаксических ошибок не обнаружено."))
+            self.statusBar.showMessage(self.tr("Анализ завершён: ошибок нет"))
+            self.results_tabs.setCurrentIndex(0)
+        else:
+            self.syntax_status_label.setText(self.tr("Обнаружены ошибки. Отображены в таблице."))
+            self.statusBar.showMessage(self.tr("Анализ завершён"))
+            self.results_tabs.setCurrentIndex(1)
+
+    def _analysis_exp(self, exp: str) -> str:
+        if len(exp) == 1 and exp in "(){};:=:":
+            return exp
+        if exp in ("const", "var", "for", "print", "in"):
+            return exp
+        return self.tr(exp)
+
+    def _format_analysis_msg(self, key: str, args: tuple) -> str:
+        if key == "syn_expect_failed":
+            exp, ctx_key, got_key = args
+            exp_show = self._analysis_exp(exp)
+            ctx_part = (" " + self.tr(ctx_key)) if ctx_key else ""
+            got_show = self.tr(got_key) if got_key == "sym_eof" else got_key
+            return self.tr("syn_expect_failed").format(exp_show, ctx_part, got_show)
+        if key == "syn_err_stmt_got":
+            return self.tr("syn_err_stmt_got").format(args[0])
+        if key == "syn_err_block_for_print":
+            return self.tr("syn_err_block_for_print").format(args[0])
+        if key == "syn_err_numeric_literal":
+            return self.tr("syn_err_numeric_literal")
+        if key == "lex_err_bad_char":
+            return self.tr("lex_err_bad_char").format(args[0])
+        if args:
+            return self.tr(key).format(*args)
+        return self.tr(key)
+
+    def _tr_lexeme(self, lexeme: str) -> str:
+        if lexeme in ("(пробел)", "(перевод строки)", "(табуляция)"):
+            return self.tr(lexeme)
+        return lexeme
+
+    def _append_syntax_error_row(self, err):
+        if len(err) == 6:
+            line, col, key, args, fragment, frag_len = err
+            msg = self._format_analysis_msg(key, args)
+        elif len(err) >= 5:
+            line, col, msg, fragment, frag_len = err[:5]
+            msg = self.tr(msg) if isinstance(msg, str) else str(msg)
+        else:
+            line, col, msg = err[:3]
+            fragment = "?"
+            frag_len = 1
+            msg = self.tr(msg) if isinstance(msg, str) else str(msg)
+        loc = self.tr("loc_fmt").format(line, col)
         row = self.errors_table.rowCount()
         self.errors_table.insertRow(row)
-        self.errors_table.setItem(row, 0, QTableWidgetItem(str(line)))
-        self.errors_table.setItem(row, 1, QTableWidgetItem(str(col)))
-        self.errors_table.setItem(row, 2, QTableWidgetItem(message))
+        frag_item = QTableWidgetItem(str(fragment))
+        frag_item.setData(Qt.ItemDataRole.UserRole, (line, col, max(frag_len, 1)))
+        self.errors_table.setItem(row, 0, frag_item)
+        self.errors_table.setItem(row, 1, QTableWidgetItem(loc))
+        self.errors_table.setItem(row, 2, QTableWidgetItem(msg))
+
+    def add_error(self, line: int, col: int, message: str):
+        self._append_syntax_error_row((line, col, message, "?", 1))
 
     def show_placeholder(self, title: str):
         QMessageBox.information(self, title, f"{self.tr('Раздел')} «{title}»\n\n{self.tr('будет реализован позже')}.")
@@ -812,7 +905,7 @@ class Compiler(QMainWindow):
             self.tr("О программе"),
             f"""
             <h2 align="center">{self.tr("Compiler")}</h2>
-            <p align="center"><b>Версия 1.0</b></p>
+            <p align="center"><b>{self.tr("Версия 1.0")}</b></p>
 
             <hr>
 
