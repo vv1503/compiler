@@ -26,7 +26,10 @@ from PyQt6.QtWidgets import (
     QHeaderView,
     QDialog,
     QStyle,
-    QLabel
+    QLabel,
+    QComboBox,
+    QPushButton,
+    QGroupBox
 )
 
 from PyQt6.QtGui import (
@@ -39,7 +42,8 @@ from PyQt6.QtGui import (
     QPainter,
     QTextFormat,
     QSyntaxHighlighter,
-    QTextCursor  
+    QTextCursor,
+    QBrush
 )
 
 from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
@@ -48,7 +52,6 @@ from lexical_analyzer import LexicalAnalyzer
 from syntax_parser import SyntaxParser
 
 
-# Нумерация строк
 class LineNumberArea(QWidget):
     def __init__(self, editor):
         super().__init__(editor)
@@ -65,16 +68,19 @@ class CodeEditor(QPlainTextEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.line_number_area = LineNumberArea(self)
-
+        
+        self.current_search_extra_selections = []  
+        self.overwrite_mode = False
+        
+        font = QFont("Courier New", 10)
+        self.setFont(font)
+        
         self.blockCountChanged.connect(self.update_line_number_area_width)
         self.updateRequest.connect(self.update_line_number_area)
         self.cursorPositionChanged.connect(self.highlight_current_line)
 
         self.update_line_number_area_width()
         self.highlight_current_line()
-
-        # Режим вставки/замены
-        self.overwrite_mode = False
 
     def line_number_area_width(self):
         digits = len(str(max(1, self.blockCount())))
@@ -119,15 +125,21 @@ class CodeEditor(QPlainTextEdit):
             block_number += 1
 
     def highlight_current_line(self):
-        extra = []
+        """Подсветка текущей строки"""
+        extra_selections = []
+        
         if not self.isReadOnly():
             selection = QTextEdit.ExtraSelection()
             selection.format.setBackground(QColor(230, 230, 255))
             selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
-            extra.append(selection)
-        self.setExtraSelections(extra)
+            extra_selections.append(selection)
+        
+        if hasattr(self, 'current_search_extra_selections'):
+            extra_selections.extend(self.current_search_extra_selections)
+        
+        self.setExtraSelections(extra_selections)
 
     def keyPressEvent(self, event):
         if self.overwrite_mode and not event.modifiers() and len(event.text()) > 0:
@@ -136,9 +148,39 @@ class CodeEditor(QPlainTextEdit):
                 cursor.deleteChar()
         super().keyPressEvent(event)
 
+    def clear_highlights(self):
+        self.current_search_extra_selections = []
+        self.highlight_current_line()
 
-# Подсветка синтаксиса 
-from PyQt6.QtGui import QSyntaxHighlighter
+    def highlight_substring(self, start_line, start_col, length):
+        """Подсвечивает подстроку в тексте"""
+        cursor = self.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.Start)
+        
+        for _ in range(start_line - 1):
+            cursor.movePosition(QTextCursor.MoveOperation.NextBlock)
+        
+        for _ in range(start_col - 1):
+            cursor.movePosition(QTextCursor.MoveOperation.Right)
+        
+        highlight_cursor = self.textCursor()
+        highlight_cursor.setPosition(cursor.position())
+        highlight_cursor.movePosition(QTextCursor.MoveOperation.Right, 
+                                     QTextCursor.MoveMode.KeepAnchor, length)
+        
+        highlight_format = QTextCharFormat()
+        highlight_format.setBackground(QBrush(QColor(144, 238, 144)))  
+        highlight_format.setForeground(QColor(0, 0, 0))
+        
+        extra = QTextEdit.ExtraSelection()
+        extra.format = highlight_format
+        extra.cursor = highlight_cursor
+        
+        self.current_search_extra_selections = [extra]
+        self.highlight_current_line()
+        
+        self.setTextCursor(cursor)
+        self.centerCursor()
 
 
 class SimpleSyntaxHighlighter(QSyntaxHighlighter):
@@ -147,21 +189,27 @@ class SimpleSyntaxHighlighter(QSyntaxHighlighter):
         self.highlighting_rules = []
 
         keyword_format = QTextCharFormat()
-        keyword_format.setForeground(QColor("#569cd6"))
+        keyword_format.setForeground(QColor(86, 156, 214))  
         keyword_format.setFontWeight(QFont.Weight.Bold)
 
-        keywords = ['var', 'const', 'if', 'else', 'while', 'for', 'return', 'true', 'false']
+        keywords = ['var', 'const', 'if', 'else', 'while', 'for', 'return', 'true', 'false', 'int', 'float', 'string']
         for word in keywords:
             pattern = QRegularExpression(r'\b' + word + r'\b')
             self.highlighting_rules.append((pattern, keyword_format))
 
         string_format = QTextCharFormat()
-        string_format.setForeground(QColor("#ce9178"))
+        string_format.setForeground(QColor(206, 145, 120))  
         self.highlighting_rules.append((QRegularExpression(r'"[^"\\]*(\\.[^"\\]*)*"'), string_format))
+        self.highlighting_rules.append((QRegularExpression(r"'[^'\\]*(\\.[^'\\]*)*'"), string_format))
 
         comment_format = QTextCharFormat()
-        comment_format.setForeground(QColor("#6a9955"))
+        comment_format.setForeground(QColor(106, 153, 85))  
         self.highlighting_rules.append((QRegularExpression(r"//.*"), comment_format))
+        self.highlighting_rules.append((QRegularExpression(r"/\*.*?\*/"), comment_format))
+
+        number_format = QTextCharFormat()
+        number_format.setForeground(QColor(39, 107, 0))  
+        self.highlighting_rules.append((QRegularExpression(r'\b\d+(?:\.\d+)?\b'), number_format))
 
     def highlightBlock(self, text):
         for pattern, fmt in self.highlighting_rules:
@@ -171,7 +219,6 @@ class SimpleSyntaxHighlighter(QSyntaxHighlighter):
                 self.setFormat(match.capturedStart(), match.capturedLength(), fmt)
 
 
-# Окно справки 
 class HelpWindow(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent) 
@@ -269,6 +316,28 @@ class HelpWindow(QDialog):
 
         edit_menu.addChildren([undo, redo, cut, copy, paste, delete, select_all])
 
+        regex_menu = QTreeWidgetItem([tr("Поиск по регулярным выражениям")])
+        regex_menu.setData(0, Qt.ItemDataRole.UserRole, f"""
+        <h2>{tr("Поиск по регулярным выражениям")}</h2>
+        <p>{tr("В программу добавлен модуль поиска подстрок с использованием регулярных выражений.")}</p>
+        
+        <h3>{tr("Доступные типы поиска:")}</h3>
+        <ul>
+            <li><b>{tr("ОГРН юридического лица")}</b> - {tr("поиск 13-значных номеров, начинающихся с 1 или 5")}</li>
+            <li><b>{tr("ИНН физических и юридических лиц")}</b> - {tr("поиск 10- или 12-значных номеров")}</li>
+            <li><b>{tr("Числа")}</b> - {tr("поиск целых и вещественных чисел (в т.ч. с экспоненциальной формой)")}</li>
+        </ul>
+        
+        <h3>{tr("Результаты поиска")}</h3>
+        <p>{tr("Результаты отображаются в таблице с колонками:")}</p>
+        <ul>
+            <li>{tr("Найденная подстрока")}</li>
+            <li>{tr("Начальная позиция (строка, символ)")}</li>
+            <li>{tr("Длина")}</li>
+        </ul>
+        <p>{tr("При выборе строки в таблице соответствующая подстрока подсвечивается зелёным цветом в тексте.")}</p>
+        """)
+
         text_menu = QTreeWidgetItem([tr("Меню Текст")])
 
         for item_text in [tr("Постановка задачи"), tr("Грамматика"), tr("Классификация грамматики"),
@@ -309,6 +378,7 @@ class HelpWindow(QDialog):
             general,
             file_menu,
             edit_menu,
+            regex_menu,
             text_menu,
             run_menu,
             help_menu,
@@ -322,6 +392,114 @@ class HelpWindow(QDialog):
                 self.content.setHtml(html)
             else:
                 self.content.clear()
+
+
+class RegexSearchEngine:
+    """Поиск по регулярным выражениям"""
+    
+    PATTERNS = {
+        "ogrn": r'\b[15]\d{2}\d{2}\d{7}\d\b',
+        "inn": r'\b(?:\d{10}|\d{12})\b',
+        "numbers": r'(?<![\w.])[-+]?(\d+)([.,]\d+)?([eE][-+]?\d+)?(?!\w)'
+    }
+    
+    @staticmethod
+    def search_ogrn(text):
+        pattern = re.compile(RegexSearchEngine.PATTERNS["ogrn"])
+        return RegexSearchEngine._find_matches(text, pattern)
+    
+    @staticmethod
+    def search_inn(text):
+        pattern = re.compile(RegexSearchEngine.PATTERNS["inn"])
+        return RegexSearchEngine._find_matches(text, pattern)
+    
+    @staticmethod
+    def search_numbers(text):
+        pattern = re.compile(r'(?<![\w.])[-+]?(\d+)([.,]\d+)?([eE][-+]?\d+)?(?!\w)')
+        
+        matches = []
+        lines = text.split('\n')
+        global_pos = 0
+        
+        for line_num, line in enumerate(lines, start=1):
+            for match in pattern.finditer(line):
+                num_str = match.group(0)
+                is_valid = True
+                
+               
+                if num_str.count('.') + num_str.count(',') > 1:
+                    is_valid = False
+                
+                
+                if 'e' in num_str.lower() or 'E' in num_str:
+                    parts = re.split(r'[eE]', num_str, maxsplit=1)
+                    if len(parts) != 2:
+                        is_valid = False
+                    else:
+                        mantissa, exponent = parts
+                        if mantissa.endswith(('.', ',')):
+                            is_valid = False
+                        exp_clean = exponent.lstrip('+-')
+                        if not exp_clean.isdigit() or not exp_clean:
+                            is_valid = False
+                
+            
+                cleaned = num_str.lstrip('-+')
+                if cleaned.startswith(('.', ',')) or cleaned.endswith(('.', ',')):
+                    is_valid = False
+                
+                if is_valid:
+                    matches.append({
+                        "text": num_str,
+                        "line": line_num,
+                        "char": match.start() + 1,
+                        "length": len(num_str),
+                        "global_start": global_pos + match.start(),
+                        "global_end": global_pos + match.end()
+                    })
+            
+            global_pos += len(line) + 1
+        
+        return matches
+            
+    @staticmethod
+    def _find_matches(text, pattern):
+        matches = []
+        
+    
+        lines = text.split('\n')
+        
+        
+        global_pos = 0
+        
+        for line_num, line in enumerate(lines, start=1):
+           
+            for match in pattern.finditer(line):
+                start_char = match.start() + 1  
+                matched_text = match.group()
+                
+                matches.append({
+                    "text": matched_text,
+                    "line": line_num,
+                    "char": start_char,
+                    "length": len(matched_text),
+                    "global_start": global_pos + match.start(),
+                    "global_end": global_pos + match.end()
+                })
+            
+          
+            global_pos += len(line) + 1
+        
+        return matches
+    
+    @staticmethod
+    def get_search_method(method_name):
+        methods = {
+            "ogrn": RegexSearchEngine.search_ogrn,
+            "inn": RegexSearchEngine.search_inn,
+            "numbers": RegexSearchEngine.search_numbers
+        }
+        return methods.get(method_name)
 
 
 # Главное окно
@@ -340,7 +518,7 @@ class Compiler(QMainWindow):
         self.current_encoding = "UTF-8"
         self.insert_mode = True 
 
-        # Статусная строка
+  
         self.statusBar = QStatusBar()
         self.setStatusBar(self.statusBar)
 
@@ -363,7 +541,7 @@ class Compiler(QMainWindow):
         self.editor.textChanged.connect(self.on_text_changed)
         self.editor.cursorPositionChanged.connect(self.update_cursor_position)
 
-        # Таймер для статистики
+
         self.stats_timer = QTimer(self)
         self.stats_timer.setSingleShot(True)
         self.stats_timer.timeout.connect(self.update_text_stats)
@@ -382,10 +560,38 @@ class Compiler(QMainWindow):
         layout.addWidget(self.splitter)
 
         self.editor = CodeEditor()
-        highlighter = SimpleSyntaxHighlighter(self.editor.document())
+        self.highlighter = SimpleSyntaxHighlighter(self.editor.document())
         self.splitter.addWidget(self.editor)
 
-        # Область результатов
+
+        self.regex_search_widget = QWidget()
+        regex_layout = QHBoxLayout(self.regex_search_widget)
+        regex_layout.setContentsMargins(5, 5, 5, 5)
+        
+        regex_label = QLabel(self.tr("Поиск по регулярным выражениям:"))
+        self.regex_combo = QComboBox()
+        self.regex_combo.addItem(self.tr("ОГРН юридического лица"), "ogrn")
+        self.regex_combo.addItem(self.tr("ИНН (физ. и юр. лиц)"), "inn")
+        self.regex_combo.addItem(self.tr("Числа (целые, вещественные, экспонента)"), "numbers")
+        
+        self.search_button = QPushButton(self.tr("Найти"))
+        self.search_button.clicked.connect(self.perform_regex_search)
+        self.search_button.setMinimumWidth(100)
+        
+        self.clear_search_button = QPushButton(self.tr("Очистить"))
+        self.clear_search_button.clicked.connect(self.clear_search_results)
+        self.clear_search_button.setMinimumWidth(100)
+        
+        self.match_count_label = QLabel("0")
+        
+        regex_layout.addWidget(regex_label)
+        regex_layout.addWidget(self.regex_combo, 1)
+        regex_layout.addWidget(self.search_button)
+        regex_layout.addWidget(self.clear_search_button)
+        regex_layout.addWidget(QLabel(self.tr("Найдено:")))
+        regex_layout.addWidget(self.match_count_label)
+        regex_layout.addStretch()
+        
         self.results_widget = QWidget()
         results_layout = QVBoxLayout(self.results_widget)
         self.results_tabs = QTabWidget()
@@ -416,18 +622,119 @@ class Compiler(QMainWindow):
         self.errors_table.cellClicked.connect(self.go_to_error)
         self.results_tabs.addTab(self.errors_table, self.tr("Ошибки"))
 
+        self.regex_results_table = QTableWidget()
+        self.regex_results_table.setColumnCount(3)
+        self.regex_results_table.setHorizontalHeaderLabels([
+            self.tr("Найденная подстрока"),
+            self.tr("Начальная позиция"),
+            self.tr("Длина")
+        ])
+        self.regex_results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.regex_results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.regex_results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.regex_results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.regex_results_table.itemSelectionChanged.connect(self.on_regex_result_selected)
+        self.results_tabs.addTab(self.regex_results_table, self.tr("Результаты поиска"))
+
         self.syntax_error_count_label = QLabel()
         self.syntax_error_count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
         self.syntax_status_label = QLabel()
         self.syntax_status_label.setWordWrap(True)
 
+        results_layout.addWidget(self.regex_search_widget)
         results_layout.addWidget(self.syntax_status_label)
         results_layout.addWidget(self.results_tabs)
         results_layout.addWidget(self.syntax_error_count_label)
         self.splitter.addWidget(self.results_widget)
-        self.splitter.setSizes([550, 200])
+        self.splitter.setSizes([450, 250])
 
+    def perform_regex_search(self):
+        """Выполняет поиск по регулярному выражению в зависимости от выбранного типа"""
+        text = self.editor.toPlainText()
+        
+        # Проверка на пустой текст
+        if not text.strip():
+            QMessageBox.information(self, self.tr("Поиск"), 
+                                   self.tr("Нет данных для поиска. Введите текст в область редактирования."))
+            return
+        
+
+        self.clear_search_results()
+        
+        search_type = self.regex_combo.currentData()
+        
+        matches = []
+        if search_type == "ogrn":
+            matches = RegexSearchEngine.search_ogrn(text)
+            search_name = self.tr("ОГРН")
+        elif search_type == "inn":
+            matches = RegexSearchEngine.search_inn(text)
+            search_name = self.tr("ИНН")
+        elif search_type == "numbers":
+            matches = RegexSearchEngine.search_numbers(text)
+            search_name = self.tr("Числа")
+        else:
+            return
+        
+        self.display_regex_results(matches)
+        
+        self.match_count_label.setText(str(len(matches)))
+        
+        if matches:
+            self.statusBar.showMessage(self.tr("Найдено {0} совпадений для типа '{1}'").format(
+                len(matches), search_name))
+        else:
+            self.statusBar.showMessage(self.tr("Совпадений для типа '{0}' не найдено").format(search_name))
+        
+        if matches:
+            self.results_tabs.setCurrentIndex(2)  
+    
+    def display_regex_results(self, matches):
+        """Отображает результаты поиска в таблице"""
+        self.regex_results_table.setRowCount(0)
+        
+        for match in matches:
+            row = self.regex_results_table.rowCount()
+            self.regex_results_table.insertRow(row)
+            
+            self.regex_results_table.setItem(row, 0, QTableWidgetItem(match["text"]))
+            
+            position = self.tr("строка {0}, символ {1}").format(match["line"], match["char"])
+            pos_item = QTableWidgetItem(position)
+            pos_item.setData(Qt.ItemDataRole.UserRole, match) 
+            self.regex_results_table.setItem(row, 1, pos_item)
+            
+            self.regex_results_table.setItem(row, 2, QTableWidgetItem(str(match["length"])))
+        
+        self.regex_results_table.resizeColumnsToContents()
+    
+    def on_regex_result_selected(self):
+        selected_rows = self.regex_results_table.selectedItems()
+        if not selected_rows:
+            return
+        
+        row = selected_rows[0].row()
+        pos_item = self.regex_results_table.item(row, 1)
+        if not pos_item:
+            return
+        
+        match_data = pos_item.data(Qt.ItemDataRole.UserRole)
+        if not match_data:
+            return
+        
+        self.editor.highlight_substring(
+            match_data["line"],
+            match_data["char"],
+            match_data["length"]
+        )
+    
+    def clear_search_results(self):
+        self.regex_results_table.setRowCount(0)
+        self.match_count_label.setText("0")
+        self.editor.clear_highlights()
+        self.statusBar.showMessage(self.tr("Результаты поиска очищены"))
+    
     def go_to_error(self, row, column):
         item = self.errors_table.item(row, 0)
         if not item:
@@ -675,6 +982,7 @@ class Compiler(QMainWindow):
 
         self.results_tabs.setTabText(0, self.tr("Лексемы"))
         self.results_tabs.setTabText(1, self.tr("Ошибки"))
+        self.results_tabs.setTabText(2, self.tr("Результаты поиска"))
 
         self.tokens_table.setHorizontalHeaderLabels([
             self.tr("Условный код"),
@@ -687,6 +995,17 @@ class Compiler(QMainWindow):
             self.tr("Местоположение"),
             self.tr("Описание"),
         ])
+        self.regex_results_table.setHorizontalHeaderLabels([
+            self.tr("Найденная подстрока"),
+            self.tr("Начальная позиция"),
+            self.tr("Длина")
+        ])
+
+        self.regex_combo.setItemText(0, self.tr("ОГРН юридического лица"))
+        self.regex_combo.setItemText(1, self.tr("ИНН (физ. и юр. лиц)"))
+        self.regex_combo.setItemText(2, self.tr("Числа (целые, вещественные, экспонента)"))
+        self.search_button.setText(self.tr("Найти"))
+        self.clear_search_button.setText(self.tr("Очистить"))
 
         self.statusBar.showMessage(self.tr("Готово") if not self.text_modified else self.tr("Изменено"))
 
@@ -698,6 +1017,7 @@ class Compiler(QMainWindow):
             self.text_modified = True
             self.update_window_title()
             self.statusBar.showMessage(self.tr("Изменено"))
+        self.clear_search_results()
 
     def update_window_title(self):
         title = self.tr("Compiler")
@@ -915,13 +1235,21 @@ class Compiler(QMainWindow):
             <h3>{self.tr("Описание проекта")}</h3>
             <p>
             {self.tr("Приложение представляет собой текстовый редактор с графическим интерфейсом пользователя.")}<br>
-            {self.tr("В дальнейшем программа будет дополнена функциями языкового процессора.")}
+            {self.tr("В программу добавлен модуль поиска по регулярным выражениям (ЛР4).")}
             </p>
+            
+            <h3>{self.tr("Доступные типы поиска")}</h3>
+            <ul>
+                <li><b>{self.tr("ОГРН")}</b> - {self.tr("13 цифр, начинается с 1 или 5")}</li>
+                <li><b>{self.tr("ИНН")}</b> - {self.tr("10 цифр (юр. лицо) или 12 цифр (физ. лицо)")}</li>
+                <li><b>{self.tr("Числа")}</b> - {self.tr("целые, вещественные (.,), экспоненциальная форма")}</li>
+            </ul>
 
             <h3>{self.tr("Используемые технологии")}</h3>
             <ul>
                 <li><b>{self.tr("Язык программирования")}:</b> Python 3</li>
                 <li><b>{self.tr("GUI-фреймворк")}:</b> PyQt6</li>
+                <li><b>{self.tr("Регулярные выражения")}:</b> re</li>
             </ul>
 
             <h3>{self.tr("Год выполнения")}</h3>
