@@ -456,7 +456,7 @@ class RegexSearchEngine:
 
     @staticmethod
     def search_literal(text, needle: str):
-        """Все вхождения подстроки needle (без перекрытий)."""
+        """Все вхождения подстроки"""
         if not needle:
             return []
         matches = []
@@ -530,6 +530,51 @@ class RegexSearchEngine:
             
             global_pos += len(line) + 1
         
+        return matches
+
+    @staticmethod
+    def search_inn_automaton(text):
+        """
+        Автомат задачи 2 (ИНН)
+        """
+        matches = []
+        lines = text.split("\n")
+        global_pos = 0
+
+        for line_num, line in enumerate(lines, start=1):
+            digits_count = 0
+            token_start = -1
+
+            def flush_token(end_exclusive: int):
+                nonlocal digits_count, token_start
+                if digits_count in (10, 12) and token_start >= 0:
+                    token = line[token_start:end_exclusive]
+                    matches.append(
+                        {
+                            "text": token,
+                            "line": line_num,
+                            "char": token_start + 1,
+                            "length": len(token),
+                            "global_start": global_pos + token_start,
+                            "global_end": global_pos + end_exclusive,
+                        }
+                    )
+                digits_count = 0
+                token_start = -1
+
+            for idx, ch in enumerate(line):
+                if ch.isdigit():
+                    if token_start < 0:
+                        token_start = idx
+                        digits_count = 1
+                    else:
+                        digits_count += 1
+                else:
+                    flush_token(idx)
+
+            flush_token(len(line))
+            global_pos += len(line) + 1
+
         return matches
             
     @staticmethod
@@ -650,6 +695,7 @@ class Compiler(QMainWindow):
         self.search_mode_combo = QComboBox()
         self.search_mode_combo.addItem(self.tr("Обычный поиск"), "plain")
         self.search_mode_combo.addItem(self.tr("Регулярные выражения"), "regex")
+        self.search_mode_combo.addItem(self.tr("Поиск автоматом"), "automaton")
         self.search_mode_combo.currentIndexChanged.connect(self._on_search_mode_changed)
         row_mode.addWidget(self.search_mode_label)
         row_mode.addWidget(self.search_mode_combo, 1)
@@ -745,6 +791,20 @@ class Compiler(QMainWindow):
         self.regex_results_table.itemSelectionChanged.connect(self.on_regex_result_selected)
         self.results_tabs.addTab(self.regex_results_table, self.tr("Результаты поиска"))
 
+        self.automaton_results_table = QTableWidget()
+        self.automaton_results_table.setColumnCount(3)
+        self.automaton_results_table.setHorizontalHeaderLabels([
+            self.tr("Найденная подстрока"),
+            self.tr("Начальная позиция"),
+            self.tr("Длина")
+        ])
+        self.automaton_results_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Stretch)
+        self.automaton_results_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        self.automaton_results_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.automaton_results_table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        self.automaton_results_table.itemSelectionChanged.connect(self.on_automaton_result_selected)
+        self.results_tabs.addTab(self.automaton_results_table, self.tr("Автомат"))
+
         self.syntax_error_count_label = QLabel()
         self.syntax_error_count_label.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
 
@@ -759,12 +819,15 @@ class Compiler(QMainWindow):
         self.splitter.setSizes([450, 250])
 
     def _on_search_mode_changed(self, _index=None):
-        is_regex = self.search_mode_combo.currentData() == "regex"
+        mode = self.search_mode_combo.currentData()
+        is_regex = mode == "regex"
         self.regex_subtype_label.setVisible(is_regex)
         self.regex_combo.setVisible(is_regex)
-        self.search_input.setEnabled(not is_regex)
+        self.search_input.setEnabled(not is_regex and mode != "automaton")
         if is_regex:
             self.search_input.setPlaceholderText(self.tr("В режиме РВ поле не используется"))
+        elif mode == "automaton":
+            self.search_input.setPlaceholderText(self.tr("В режиме автомата поле не используется"))
         else:
             self.search_input.setPlaceholderText(self.tr("Введите подстроку"))
 
@@ -802,21 +865,33 @@ class Compiler(QMainWindow):
                 return
             matches = RegexSearchEngine.search_literal(text, needle)
             search_name = self.tr("Обычный поиск")
+            results_tab_idx = 3
         else:
-            search_type = self.regex_combo.currentData()
-            if search_type == "ogrn":
-                matches = RegexSearchEngine.search_ogrn(text)
-                search_name = self.tr("ОГРН")
-            elif search_type == "inn":
-                matches = RegexSearchEngine.search_inn(text)
-                search_name = self.tr("ИНН")
-            elif search_type == "numbers":
-                matches = RegexSearchEngine.search_numbers(text)
-                search_name = self.tr("Числа")
+            if mode == "regex":
+                search_type = self.regex_combo.currentData()
+                if search_type == "ogrn":
+                    matches = RegexSearchEngine.search_ogrn(text)
+                    search_name = self.tr("ОГРН")
+                elif search_type == "inn":
+                    matches = RegexSearchEngine.search_inn(text)
+                    search_name = self.tr("ИНН")
+                elif search_type == "numbers":
+                    matches = RegexSearchEngine.search_numbers(text)
+                    search_name = self.tr("Числа")
+                else:
+                    return
+                results_tab_idx = 3
+            elif mode == "automaton":
+                matches = RegexSearchEngine.search_inn_automaton(text)
+                search_name = self.tr("ИНН (автомат)")
+                results_tab_idx = 4
             else:
                 return
 
-        self.display_regex_results(matches)
+        if mode == "automaton":
+            self.display_automaton_results(matches)
+        else:
+            self.display_regex_results(matches)
 
         self.match_count_label.setText(str(len(matches)))
 
@@ -830,7 +905,7 @@ class Compiler(QMainWindow):
             )
 
         if matches:
-            self.results_tabs.setCurrentIndex(3)  
+            self.results_tabs.setCurrentIndex(results_tab_idx)
     
     def display_regex_results(self, matches):
         """Отображает результаты поиска в таблице"""
@@ -870,9 +945,48 @@ class Compiler(QMainWindow):
             match_data["char"],
             match_data["length"]
         )
+
+    def display_automaton_results(self, matches):
+        self.automaton_results_table.setRowCount(0)
+
+        for match in matches:
+            row = self.automaton_results_table.rowCount()
+            self.automaton_results_table.insertRow(row)
+
+            self.automaton_results_table.setItem(row, 0, QTableWidgetItem(match["text"]))
+
+            position = self.tr("строка {0}, символ {1}").format(match["line"], match["char"])
+            pos_item = QTableWidgetItem(position)
+            pos_item.setData(Qt.ItemDataRole.UserRole, match)
+            self.automaton_results_table.setItem(row, 1, pos_item)
+
+            self.automaton_results_table.setItem(row, 2, QTableWidgetItem(str(match["length"])))
+
+        self.automaton_results_table.resizeColumnsToContents()
+
+    def on_automaton_result_selected(self):
+        selected_rows = self.automaton_results_table.selectedItems()
+        if not selected_rows:
+            return
+
+        row = selected_rows[0].row()
+        pos_item = self.automaton_results_table.item(row, 1)
+        if not pos_item:
+            return
+
+        match_data = pos_item.data(Qt.ItemDataRole.UserRole)
+        if not match_data:
+            return
+
+        self.editor.highlight_substring(
+            match_data["line"],
+            match_data["char"],
+            match_data["length"]
+        )
     
     def clear_search_results(self):
         self.regex_results_table.setRowCount(0)
+        self.automaton_results_table.setRowCount(0)
         self.match_count_label.setText("0")
         self.editor.clear_highlights()
         self.statusBar.showMessage(self.tr("Результаты поиска очищены"))
@@ -1136,6 +1250,7 @@ class Compiler(QMainWindow):
         self.results_tabs.setTabText(1, self.tr("AST"))
         self.results_tabs.setTabText(2, self.tr("Ошибки"))
         self.results_tabs.setTabText(3, self.tr("Результаты поиска"))
+        self.results_tabs.setTabText(4, self.tr("Автомат"))
 
         self.tokens_table.setHorizontalHeaderLabels([
             self.tr("Условный код"),
@@ -1159,6 +1274,7 @@ class Compiler(QMainWindow):
         self.search_mode_label.setText(self.tr("Режим:"))
         self.search_mode_combo.setItemText(0, self.tr("Обычный поиск"))
         self.search_mode_combo.setItemText(1, self.tr("Регулярные выражения"))
+        self.search_mode_combo.setItemText(2, self.tr("Поиск автоматом"))
         self.regex_subtype_label.setText(self.tr("Тип шаблона:"))
         self.regex_combo.setItemText(0, self.tr("ОГРН юридического лица"))
         self.regex_combo.setItemText(1, self.tr("ИНН (физ. и юр. лиц)"))
