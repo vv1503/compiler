@@ -63,7 +63,9 @@
 
 ### Тестовые примеры
 ![](screenshots/rv1.png)
+
 ![](screenshots/rv2.png)
+
 ![](screenshots/rv3.png)
 
 ### Граф автомата
