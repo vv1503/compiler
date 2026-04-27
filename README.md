@@ -38,7 +38,7 @@ for (i in 1:10) {
 - `SimpleTypeNode` — явный тип `int` / `float` при аннотации.
 
 
-**Рисунок AST для верной строки в draw.io
+##Рисунок AST для верной строки в draw.io
 
  ![](screenshots/ast_drawio.png)
 
