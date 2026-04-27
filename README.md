@@ -39,6 +39,7 @@ for (i in 1:10) {
 
 
 **Рисунок AST для верной строки в draw.io
+
  ![](screenshots/ast_drawio.png)
 
 
