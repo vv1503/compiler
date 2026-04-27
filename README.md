@@ -38,16 +38,8 @@ for (i in 1:10) {
 - `SimpleTypeNode` — явный тип `int` / `float` при аннотации.
 
 
-**Пример AST** для `for (i in 1:10) { print(i); };`:
-
-```text
-ProgramNode
-`- ForStmtNode (loop_var=i)
-   |- IntLiteralNode (value=1)
-   |- IntLiteralNode (value=10)
-   `- PrintStmtNode (argument=i)
-      `- IdentifierNode (name=i)
-```
+**Рисунок AST для верной строки в draw.io
+ ![](screenshots/ast_drawio.png)
 
 
 ### Формат вывода программы
