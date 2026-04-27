@@ -7,8 +7,6 @@ class LexicalAnalyzer:
             "print": "ключевое слово",
             "const": "ключевое слово",
             "var": "ключевое слово",
-            "int": "ключевое слово",
-            "float": "ключевое слово",
         }
         self.operators = {
             ":": "оператор диапазона",
@@ -162,4 +160,92 @@ class LexicalAnalyzer:
             i += 1
             char_pos += 1
 
-        return tokens, errors
+        return tokens, self._merge_keyword_noise_lexical_errors(text, tokens, errors)
+
+    @staticmethod
+    def _merge_keyword_noise_lexical_errors(text, tokens, errors):
+        """Объединяет отдельные lex_err_bad_char в более понятные сообщения (for@for, i@n)."""
+        if not text or not errors:
+            return errors
+        lines = text.splitlines()
+        nt = [t for t in tokens if t.get("kind") != "WS"]
+        merged = []
+        used = set()
+        for ei, err in enumerate(errors):
+            if ei in used:
+                continue
+            if len(err) < 6:
+                merged.append(err)
+                continue
+            line, col, key, args, frag, flen = err
+            if key != "lex_err_bad_char" or not args:
+                merged.append(err)
+                continue
+            ch = args[0]
+            L = int(line)
+            C = int(col)
+            if L < 1 or L > len(lines):
+                merged.append(err)
+                continue
+            line_text = lines[L - 1]
+            prev_tok = None
+            next_tok = None
+            for t in nt:
+                tl = int(t.get("line", 1))
+                if tl != L:
+                    continue
+                te = int(t.get("end_col", t.get("col", 1)))
+                tc = int(t.get("col", 1))
+                if te < C:
+                    prev_tok = t
+                elif tc > C and next_tok is None:
+                    next_tok = t
+                    break
+            if prev_tok is not None and next_tok is not None:
+                pk = prev_tok.get("kind")
+                nk = next_tok.get("kind")
+                ple = int(prev_tok.get("end_col", prev_tok.get("col", 1)))
+                nsc = int(next_tok.get("col", 1))
+                nen = int(next_tok.get("end_col", next_tok.get("col", 1)))
+                if (
+                    pk == "KW_FOR"
+                    and nk == "KW_FOR"
+                    and (prev_tok.get("lexeme") or "") == "for"
+                    and (next_tok.get("lexeme") or "") == "for"
+                    and ple < C < nsc
+                ):
+                    frag_span = line_text[ple:nen] if nen > ple else "@for"
+                    fs = frag_span if frag_span.strip() else "@for"
+                    merged.append(
+                        (
+                            L,
+                            C,
+                            "lex_err_noise_duplicate_kw",
+                            (fs, "for"),
+                            fs,
+                            max(len(fs), 1),
+                        )
+                    )
+                    used.add(ei)
+                    continue
+                if (
+                    pk == "ID"
+                    and nk == "ID"
+                    and (prev_tok.get("lexeme") or "") == "i"
+                    and (next_tok.get("lexeme") or "") == "n"
+                    and ple < C < nsc
+                ):
+                    merged.append(
+                        (
+                            L,
+                            C,
+                            "lex_err_noise_inside_in",
+                            (ch,),
+                            ch,
+                            1,
+                        )
+                    )
+                    used.add(ei)
+                    continue
+            merged.append(err)
+        return merged

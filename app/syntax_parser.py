@@ -1,37 +1,22 @@
 from __future__ import annotations
 
-import math
-from typing import List, Optional, Tuple
-
-from ast_nodes import (
-    AstNode,
-    ConstDeclNode,
-    FloatLiteralNode,
-    ForStmtNode,
-    IdentifierNode,
-    IntLiteralNode,
-    LiteralNode,
-    PrintStmtNode,
-    ProgramNode,
-    SimpleTypeNode,
-    VarDeclNode,
-)
-from symbol_table import SymbolTable
-
-MAX_INT32 = 2**31 - 1
-
 
 class SyntaxParser:
     SYNC_KINDS = frozenset({"SEMI"})
 
-    def __init__(self, tokens):
+    def __init__(self, tokens, lex_errors=None):
         filtered = [t for t in tokens if t.get("kind") != "WS"]
         self.tokens = filtered
         self.pos = 0
-        self.errors: list = []
-        self.program = ProgramNode()
-        self.global_sym = SymbolTable()
-        self.sym: SymbolTable = self.global_sym
+        self.errors = []
+        self._lex_error_cols = {}
+        for err in (lex_errors or []):
+            if len(err) < 2:
+                continue
+            line, col = int(err[0]), int(err[1])
+            self._lex_error_cols.setdefault(line, []).append(col)
+        for line in self._lex_error_cols:
+            self._lex_error_cols[line].sort()
 
         if not self.tokens:
             self._eof = {"kind": "EOF", "lexeme": "", "line": 1, "col": 1, "end_col": 1}
@@ -41,6 +26,7 @@ class SyntaxParser:
             ec = last.get("end_col", last.get("col", 1)) + 1
             self._eof = {"kind": "EOF", "lexeme": "", "line": el, "col": ec, "end_col": ec}
         self.tokens.append(self._eof)
+        self._for_loop_var_stack: list[str | None] = []
 
     def _at(self, idx):
         if 0 <= idx < len(self.tokens):
@@ -70,169 +56,184 @@ class SyntaxParser:
             "KW_VAR": "var",
             "KW_FOR": "for",
             "KW_PRINT": "print",
-            "KW_INT": "int",
-            "KW_FLOAT": "float",
         }
         return m.get(kind, kind)
 
     def parse(self):
         while self._kind() != "EOF":
-            stmt = self._parse_statement()
-            if stmt is not None:
-                self.program.body.append(stmt)
-        return self.errors, self.program
+            self._parse_statement()
+        return self.errors
 
-    def _parse_statement(self) -> Optional[AstNode]:
+    def _parse_statement(self):
         k = self._kind()
         if k == "KW_CONST":
-            return self._parse_const_decl()
-        if k == "KW_VAR":
-            return self._parse_var_decl()
-        if k == "KW_FOR":
-            return self._parse_for_stmt(require_trailing_semi=True)
-        t = self._current()
-        frag = t.get("lexeme", "") or ""
-        self._add_error(
-            t.get("line", 1),
-            t.get("col", 1),
-            "syn_err_stmt_got",
-            (frag,),
-            frag[:32] if frag else "?",
-            max(len(frag), 1),
-        )
-        self._synchronize_irons()
-        return None
+            self._parse_const_decl()
+        elif k == "KW_VAR":
+            self._parse_var_decl()
+        elif k == "KW_FOR":
+            self._parse_for_stmt(require_trailing_semi=True)
+        elif k == "ID" and self._consume_near_keyword("for"):
+            self._parse_for_stmt_core(require_trailing_semi=True, typo_recovered=True)
+        else:
+            t = self._current()
+            frag = t.get("lexeme", "") or ""
+            self._add_error(
+                t.get("line", 1),
+                t.get("col", 1),
+                "syn_err_stmt_got",
+                (frag,),
+                frag[:32] if frag else "?",
+                max(len(frag), 1),
+            )
+            self._synchronize_irons()
 
-    def _parse_for_stmt(self, require_trailing_semi: bool = False) -> Optional[ForStmtNode]:
-        kw = self._current()
+    def _parse_for_stmt(self, require_trailing_semi: bool = False):
         self._consume("KW_FOR")
+        self._parse_for_stmt_core(require_trailing_semi=require_trailing_semi, typo_recovered=False)
+
+    def _parse_for_stmt_core(self, require_trailing_semi: bool = False, typo_recovered: bool = False):
+        self._skip_duplicated_keyword_after_lex_error("for")
         if not self._match("LPAREN"):
             self._expect_failed("(", "ctx_after_for")
-            self._synchronize_irons()
-            return None
-        if not self._match("ID"):
-            self._expect_failed("sym_identifier", "ctx_header_for")
-            self._synchronize_irons()
-            return None
-        loop_tok = self._at(self.pos - 1)
-        loop_name = loop_tok.get("lexeme", "")
-        loop_line = loop_tok.get("line", 1)
-        loop_col = loop_tok.get("col", 1)
-        if not self._match("KW_IN"):
+            # Не принимаем токен на месте «(» за начало корректного заголовка — сдвигаемся дальше.
+            if self._kind() != "EOF":
+                self.pos += 1
+        id_ok = self._match("ID")
+        loop_var: str | None = None
+        if id_ok:
+            loop_var = (self._at(self.pos - 1).get("lexeme") or "") or None
+        in_ok = False
+        if not id_ok:
+            # Сразу «in» без имени переменной (например после пропуска «i» в «fr i in …»)
+            if self._kind() == "KW_IN" and (self._current().get("lexeme") or "").lower() == "in":
+                t = self._current()
+                self._add_error(
+                    t.get("line", 1),
+                    t.get("col", 1),
+                    "syn_err_in_without_loop_var",
+                    (),
+                    "in",
+                    max(len(t.get("lexeme", "") or "in"), 2),
+                )
+                self.pos += 1
+                in_ok = True
+            else:
+                self._expect_failed("sym_identifier", "ctx_header_for")
+                if self._kind() == "ID":
+                    self.pos += 1
+                    id_ok = self._match("ID")
+
+        if id_ok and not in_ok:
+            in_ok = self._match("KW_IN") or self._consume_damaged_in_splits()
+
+        if not in_ok:
             self._expect_failed("in", "ctx_after_loop_var")
-            self._synchronize_irons()
-            return None
-        if not self._match("INT"):
-            self._expect_failed("sym_integer", "ctx_range_start")
-            self._synchronize_irons()
-            return None
-        start_tok = self._at(self.pos - 1)
-        start_node = self._int_literal_from_token(start_tok)
+            # Если вместо in пришел идентификатор (обычно хвост после
+            # недопустимого символа), сдвигаемся на него один раз,
+            # чтобы не вызывать каскад ошибок по заголовку for.
+            if self._kind() == "ID":
+                self.pos += 1
+
+        self._expect_or_report("INT", "sym_integer", "ctx_range_start", consume_if_stuck=True)
+        prev_int = self._at(self.pos - 1)
+        recovered_single_literal = False
         if not self._match("COLON"):
-            self._expect_failed(":", "ctx_in_range")
-            self._synchronize_irons()
-            return None
-        if not self._match("INT"):
-            self._expect_failed("sym_integer", "ctx_range_end")
-            self._synchronize_irons()
-            return None
-        end_tok = self._at(self.pos - 1)
-        end_node = self._int_literal_from_token(end_tok)
-        if not self._match("RPAREN"):
-            self._expect_failed(")", "ctx_after_range")
-            self._synchronize_irons()
-            return None
-        if not self._match("LBRACE"):
-            self._expect_failed("{", "ctx_before_loop_body")
-            self._synchronize_irons()
-            return None
+            if self._kind() == "RPAREN" and prev_int.get("kind") == "INT":
+                lit = (prev_int.get("lexeme") or "")
+                if lit.isdigit():
+                    pline = int(prev_int.get("line", 1))
+                    pcol = int(prev_int.get("col", 1))
+                    pend = int(prev_int.get("end_col", pcol))
+                    ccol = pcol + 1 if pend > pcol else pcol
+                    self._add_error(
+                        pline,
+                        ccol,
+                        "syn_err_range_missing_colon_in_literal",
+                        (lit,),
+                        ":",
+                        1,
+                    )
+                    self._add_error(
+                        pline,
+                        pend,
+                        "syn_err_range_missing_upper_bound",
+                        (lit,),
+                        lit,
+                        max(len(lit), 1),
+                    )
+                    recovered_single_literal = True
+            if not recovered_single_literal:
+                prev = self._at(self.pos - 1)
+                if (
+                    self._kind() == "INT"
+                    and prev.get("kind") == "INT"
+                    and int(self._current().get("line", 1)) == int(prev.get("line", 1))
+                ):
+                    gap = int(self._current().get("col", 1)) - int(
+                        prev.get("end_col", prev.get("col", 1))
+                    )
+                    if gap >= 1:
+                        ln = int(prev.get("line", 1))
+                        cl = int(prev.get("end_col", prev.get("col", 1))) + 1
+                        self._add_error(
+                            ln,
+                            cl,
+                            "syn_err_range_missing_colon_between",
+                            (),
+                            ":",
+                            1,
+                        )
+                self._expect_failed(":", "ctx_in_range")
+                t = self._current()
+                line, col = int(t.get("line", 1)), int(t.get("col", 1))
+                if self._kind() != "EOF":
+                    t_after = self._current()
+                    if int(t_after.get("line", 1)) == line and int(t_after.get("col", 1)) == col:
+                        self.pos += 1
+        if not recovered_single_literal:
+            self._expect_or_report("INT", "sym_integer", "ctx_range_end", consume_if_stuck=True)
+            self._skip_split_range_tail()
+        self._expect_or_report("RPAREN", ")", "ctx_after_range", consume_if_stuck=True)
 
-        range_ok = self._check_range_literals(start_node, end_node, start_tok, end_tok)
+        self._for_loop_var_stack.append(loop_var)
+        try:
+            # Тело цикла по грамматике всегда в «{ … }»; не скрываем ошибку, даже если дальше похоже на print/for.
+            if not self._match("LBRACE"):
+                prev = self._at(self.pos - 1)
+                # Явное сообщение об отсутствии «{» — для нормального for (KW_FOR) после «)».
+                # При восстановлении из опечатки (f@o и т.п.) не дублируем, если дальше явное тело.
+                if prev.get("kind") == "RPAREN" and not typo_recovered:
+                    ln = int(prev.get("line", 1))
+                    cl = int(prev.get("end_col", prev.get("col", 1))) + 1
+                    self._add_error(ln, cl, "syn_err_missing_lbrace_for", (), "{", 1)
+                elif not (typo_recovered and self._looks_like_block_stmt_start()):
+                    self._expect_failed("{", "ctx_before_loop_body")
+            self._parse_block_stmt_list()
+            self._expect_or_report("RBRACE", "}", "ctx_end_loop_body")
+            if require_trailing_semi:
+                self._expect_or_report("SEMI", ";", "ctx_after_for_brace")
+            elif self._kind() == "SEMI":
+                self.pos += 1
+        finally:
+            self._for_loop_var_stack.pop()
 
-        outer = self.sym
-        inner = SymbolTable(parent=outer)
-        inner.declare(loop_name, "loop", "int", loop_line)
-        self.sym = inner
-        body_nodes = self._parse_block_stmt_list()
-        self.sym = outer
-
-        if not self._match("RBRACE"):
-            self._expect_failed("}", "ctx_end_loop_body")
-            self._synchronize_to_rbrace()
-            return None
-        if require_trailing_semi:
-            if not self._match("SEMI"):
-                self._expect_failed(";", "ctx_after_for_brace")
-                self._synchronize_irons()
-        elif self._kind() == "SEMI":
-            self.pos += 1
-
-        if not range_ok:
-            return None
-
-        node = ForStmtNode(
-            line=kw.get("line", 1),
-            col=kw.get("col", 1),
-            loop_var=loop_name,
-            loop_var_line=loop_line,
-            loop_var_col=loop_col,
-            range_start=start_node,
-            range_end=end_node,
-            body=body_nodes,
-        )
-        return node
-
-    def _check_range_literals(
-        self,
-        start_node: IntLiteralNode,
-        end_node: IntLiteralNode,
-        start_tok: dict,
-        end_tok: dict,
-    ) -> bool:
-        ok = True
-        if not self._int_in_range(start_node.value):
-            self._add_error(
-                start_tok.get("line", 1),
-                start_tok.get("col", 1),
-                "sem_int_out_of_range",
-                (start_node.value, MAX_INT32),
-                start_tok.get("lexeme", ""),
-                max(len(start_tok.get("lexeme", "")), 1),
-            )
-            ok = False
-        if not self._int_in_range(end_node.value):
-            self._add_error(
-                end_tok.get("line", 1),
-                end_tok.get("col", 1),
-                "sem_int_out_of_range",
-                (end_node.value, MAX_INT32),
-                end_tok.get("lexeme", ""),
-                max(len(end_tok.get("lexeme", "")), 1),
-            )
-            ok = False
-        if ok and start_node.value > end_node.value:
-            self._add_error(
-                end_tok.get("line", 1),
-                end_tok.get("col", 1),
-                "sem_range_order",
-                (start_node.value, end_node.value),
-                end_tok.get("lexeme", ""),
-                max(len(end_tok.get("lexeme", "")), 1),
-            )
-            ok = False
-        return ok
-
-    def _parse_block_stmt_list(self) -> List[AstNode]:
-        items: List[AstNode] = []
+    def _parse_block_stmt_list(self):
         while self._kind() not in ("RBRACE", "EOF"):
             if self._kind() == "KW_PRINT":
-                n = self._parse_print_stmt()
-                if n is not None:
-                    items.append(n)
+                self._parse_print_stmt()
             elif self._kind() == "KW_FOR":
-                n = self._parse_for_stmt(require_trailing_semi=False)
-                if n is not None:
-                    items.append(n)
+                self._parse_for_stmt(require_trailing_semi=False)
+            elif self._kind() == "ID" and self._consume_near_keyword("print"):
+                self._parse_print_stmt_core()
+            elif self._kind() == "ID" and self._at(self.pos + 1).get("kind") == "LPAREN":
+                # В теле блока grammar допускает только print(...) и for(...).
+                # Конструкция вида ID(...) трактуется как испорченный print(...),
+                # чтобы не порождать каскад лишних ошибок по каждому токену внутри.
+                self._add_keyword_typo_error(
+                    "print", self._current().get("lexeme", "") or ""
+                )
+                self.pos += 1
+                self._parse_print_stmt_core()
             else:
                 t = self._current()
                 frag = t.get("lexeme", "") or ""
@@ -245,55 +246,211 @@ class SyntaxParser:
                     max(len(frag), 1),
                 )
                 self._synchronize_in_block()
-        return items
 
-    def _parse_print_stmt(self) -> Optional[PrintStmtNode]:
-        kw = self._current()
+    def _parse_print_stmt(self):
         self._consume("KW_PRINT")
-        if not self._match("LPAREN"):
-            self._expect_failed("(", "ctx_after_print")
-            self._synchronize_in_block()
-            return None
-        if not self._match("ID"):
-            self._expect_failed("sym_identifier", "ctx_in_print")
-            self._synchronize_in_block()
-            return None
-        id_tok = self._at(self.pos - 1)
-        name = id_tok.get("lexeme", "")
-        info = self.sym.lookup(name)
-        if info is None:
-            self._add_error(
-                id_tok.get("line", 1),
-                id_tok.get("col", 1),
-                "sem_undeclared",
-                (name,),
-                name,
-                max(len(name), 1),
-            )
-            if not self._match("RPAREN"):
-                self._expect_failed(")", "ctx_after_print_arg")
-                self._synchronize_in_block()
-                return None
-            if self._kind() == "SEMI":
-                self.pos += 1
-            return None
+        self._parse_print_stmt_core()
 
-        if not self._match("RPAREN"):
-            self._expect_failed(")", "ctx_after_print_arg")
-            self._synchronize_in_block()
-            return None
+    def _parse_print_stmt_core(self):
+        self._expect_or_report("LPAREN", "(", "ctx_after_print")
+        if self._match("ID"):
+            arg_tok = self._at(self.pos - 1)
+            arg_lex = (arg_tok.get("lexeme") or "") or ""
+            exp = self._for_loop_var_stack[-1] if self._for_loop_var_stack else None
+            if exp and arg_lex and arg_lex != exp:
+                self._add_error(
+                    int(arg_tok.get("line", 1)),
+                    int(arg_tok.get("col", 1)),
+                    "sem_err_print_arg_not_loop_var",
+                    (exp, arg_lex),
+                    arg_lex,
+                    max(len(arg_lex), 1),
+                )
+        else:
+            self._expect_failed("sym_identifier", "ctx_in_print")
+        self._expect_or_report("RPAREN", ")", "ctx_after_print_arg")
         if self._kind() == "SEMI":
             self.pos += 1
 
-        arg = IdentifierNode(
-            line=id_tok.get("line", 1),
-            col=id_tok.get("col", 1),
-            name=name,
-        )
-        return PrintStmtNode(line=kw.get("line", 1), col=kw.get("col", 1), argument=arg)
+    def _expect_or_report(self, kind: str, exp: str, ctx_key: str, consume_if_stuck: bool = False) -> bool:
+        if self._match(kind):
+            return True
+        t = self._current()
+        line = t.get("line", 1)
+        col = t.get("col", 1)
+        self._expect_failed(exp, ctx_key)
+        if consume_if_stuck and self._kind() != "EOF":
+            t_after = self._current()
+            if t_after.get("line", 1) == line and t_after.get("col", 1) == col:
+                self.pos += 1
+        return False
+
+    def _looks_like_block_stmt_start(self) -> bool:
+        k = self._kind()
+        if k in ("KW_PRINT", "KW_FOR"):
+            return True
+        if k != "ID":
+            return False
+        lex = self._current().get("lexeme", "") or ""
+        if self._at(self.pos + 1).get("kind") == "LPAREN":
+            return True
+        return self._is_near_keyword(lex, "print") or self._is_near_keyword(lex, "for")
+
+    def _skip_split_range_tail(self):
+        # Пример: 1:5@0 -> после лексера это INT(5), INT(0), RPAREN.
+        # В таком случае "0" — хвост поврежденного числа, уже покрытый
+        # лексической ошибкой по недопустимому символу, поэтому не создаем
+        # каскад синтаксических ошибок в заголовке for.
+        if self._kind() != "INT":
+            return
+        if self._at(self.pos + 1).get("kind") == "RPAREN":
+            self.pos += 1
+
+    def _consume_damaged_in_splits(self) -> bool:
+        cur = self._current()
+        if cur.get("kind") != "ID":
+            return False
+        cur_lex = (cur.get("lexeme", "") or "")
+        if cur_lex == "in":
+            self.pos += 1
+            return True
+
+        # Случай i@n / i"n: лексер часто разбивает на ID('i') и ID('n')
+        # с лексической ошибкой между ними; считаем это восстановленным 'in'.
+        if cur_lex == "i":
+            nxt = self._at(self.pos + 1)
+            if (
+                nxt.get("kind") == "ID"
+                and (nxt.get("lexeme", "") or "") == "n"
+                and self._has_lex_error_between(cur, nxt)
+            ):
+                self.pos += 2
+                return True
+        if cur_lex == "n":
+            prev = self._at(self.pos - 1)
+            if (
+                prev.get("kind") == "ID"
+                and (prev.get("lexeme", "") or "") == "i"
+                and self._has_lex_error_between(prev, cur)
+            ):
+                self.pos += 1
+                return True
+        return False
+
+    def _skip_duplicated_keyword_after_lex_error(self, keyword: str):
+        if self.pos <= 0:
+            return
+        cur = self._current()
+        prev = self._at(self.pos - 1)
+        if not self._token_is_keyword_like(prev, keyword):
+            return
+        if not self._token_is_keyword_like(cur, keyword):
+            return
+        if self._has_lex_error_between(prev, cur):
+            self.pos += 1
+
+    @staticmethod
+    def _token_is_keyword_like(tok, keyword: str) -> bool:
+        kind = tok.get("kind")
+        if kind == ("KW_" + keyword.upper()):
+            return True
+        return kind == "ID" and (tok.get("lexeme", "") or "") == keyword
+
+    def _has_lex_error_between(self, left_tok, right_tok) -> bool:
+        left_line = int(left_tok.get("line", 1))
+        right_line = int(right_tok.get("line", 1))
+        if left_line != right_line:
+            return False
+        left_end = int(left_tok.get("end_col", left_tok.get("col", 1)))
+        right_col = int(right_tok.get("col", 1))
+        for col in self._lex_error_cols.get(left_line, []):
+            if left_end < col < right_col:
+                return True
+        return False
+
+    def _consume_near_keyword(self, keyword: str) -> bool:
+        t = self._current()
+        if t.get("kind") != "ID":
+            return False
+
+        lex = t.get("lexeme", "") or ""
+        if lex == keyword:
+            self.pos += 1
+            return True
+
+        joined = lex
+        consumed = 1
+        line = t.get("line")
+        prev = t
+        max_parts = min(len(keyword) + 1, 6)
+        while consumed < max_parts:
+            nxt = self._at(self.pos + consumed)
+            if nxt.get("kind") != "ID" or nxt.get("line") != line:
+                break
+            gap = int(nxt.get("col", 0)) - int(prev.get("end_col", prev.get("col", 0)))
+            # Между частями слова могут быть шумовые символы (например, '@', '#'),
+            # поэтому допускаем небольшой разрыв по позиции.
+            if gap < 1 or gap > 4:
+                break
+            joined += (nxt.get("lexeme", "") or "")
+            consumed += 1
+            prev = nxt
+            if self._is_near_keyword(joined, keyword):
+                if joined != keyword:
+                    self._add_keyword_typo_error(keyword, joined)
+                self.pos += consumed
+                return True
+
+        # Если собрать ключевое слово из соседних ID не удалось, пробуем
+        # одиночный почти-совпадающий токен (например, f@o -> fo).
+        if self._is_near_keyword(lex, keyword):
+            if lex != keyword:
+                self._add_keyword_typo_error(keyword, lex)
+            self.pos += 1
+            return True
+
+        # Поддержка склеенных ключевых слов вроде "forfor", "printprint":
+        # считаем это одной ошибкой по ключевому слову и продолжаем разбор
+        # по соответствующей грамматической ветке.
+        if lex.startswith(keyword) and len(lex) > len(keyword):
+            self._add_keyword_typo_error(keyword, lex)
+            self.pos += 1
+            return True
+
+        return False
+
+    @staticmethod
+    def _is_near_keyword(word: str, keyword: str) -> bool:
+        if not word:
+            return False
+        if word == keyword:
+            return True
+        if abs(len(word) - len(keyword)) > 1:
+            return False
+        i = j = edits = 0
+        while i < len(word) and j < len(keyword):
+            if word[i] == keyword[j]:
+                i += 1
+                j += 1
+                continue
+            edits += 1
+            if edits > 1:
+                return False
+            if len(word) == len(keyword):
+                i += 1
+                j += 1
+            elif len(word) > len(keyword):
+                i += 1
+            else:
+                j += 1
+        edits += (len(word) - i) + (len(keyword) - j)
+        return edits <= 1
 
     def _synchronize_in_block(self):
-        while self._kind() not in ("RBRACE", "EOF", "KW_FOR", "KW_PRINT"):
+        self._skip_error_token()
+        while self._kind() not in ("RBRACE", "EOF", "SEMI", "KW_FOR", "KW_PRINT", "ID"):
+            self.pos += 1
+        if self._kind() == "SEMI":
             self.pos += 1
 
     def _synchronize_to_rbrace(self):
@@ -304,230 +461,71 @@ class SyntaxParser:
         if self._kind() == "SEMI":
             self.pos += 1
 
-    def _parse_optional_type(self) -> Tuple[Optional[str], Optional[SimpleTypeNode], bool]:
-        """Возвращает (аннотация, узел типа, признак фатальной ошибки после ':')."""
-        if self._kind() != "COLON":
-            return None, None, False
-        self.pos += 1
-        k = self._kind()
-        if k == "KW_INT":
-            t = self._current()
+    def _synchronize_for_header(self):
+        checkpoints = ("LBRACE", "SEMI", "RBRACE", "EOF", "KW_CONST", "KW_VAR", "KW_FOR")
+        # Если уже стоим на чекпоинте (например, сразу на '{' после ошибки в ')'),
+        # не пропускаем его — пытаемся восстановить структуру цикла дальше.
+        if self._kind() not in checkpoints:
+            self._skip_error_token()
+        while self._kind() not in checkpoints:
             self.pos += 1
-            return "int", SimpleTypeNode(line=t.get("line", 1), col=t.get("col", 1), name="int"), False
-        if k == "KW_FLOAT":
-            t = self._current()
+        if self._kind() == "SEMI":
             self.pos += 1
-            return "float", SimpleTypeNode(line=t.get("line", 1), col=t.get("col", 1), name="float"), False
-        bad = self._current()
-        self._add_error(
-            bad.get("line", 1),
-            bad.get("col", 1),
-            "syn_err_expected_int_float",
-            (),
-            bad.get("lexeme", "")[:32] if bad.get("lexeme") else "?",
-            max(len(bad.get("lexeme", "")), 1) if bad.get("lexeme") else 1,
-        )
-        self._synchronize_irons()
-        return None, None, True
 
-    def _parse_const_decl(self) -> Optional[ConstDeclNode]:
-        kw = self._current()
+    def _try_parse_recovered_for_body(self, require_trailing_semi: bool):
+        if not self._match("LBRACE"):
+            return
+        self._parse_block_stmt_list()
+        if not self._match("RBRACE"):
+            self._expect_failed("}", "ctx_end_loop_body")
+            self._synchronize_to_rbrace()
+            return
+        if require_trailing_semi:
+            if not self._match("SEMI"):
+                self._expect_failed(";", "ctx_after_for_brace")
+                self._synchronize_irons()
+        elif self._kind() == "SEMI":
+            self.pos += 1
+
+    def _parse_const_decl(self):
         self._consume("KW_CONST")
         if not self._match("ID"):
             self._expect_failed("sym_identifier", "ctx_after_const")
             self._synchronize_irons()
-            return None
-        name_tok = self._at(self.pos - 1)
-        name = name_tok.get("lexeme", "")
-        n_line = name_tok.get("line", 1)
-        n_col = name_tok.get("col", 1)
-
-        type_ann, type_node, type_bad = self._parse_optional_type()
-        if type_bad:
-            return None
-
+            return
         if not self._match("ASSIGN"):
             self._expect_failed("=", "ctx_after_const_name")
             self._synchronize_irons()
-            return None
-        lit = self._parse_literal_expr()
-        if lit is None:
+            return
+        if not self._parse_literal_expr():
             self._synchronize_irons()
-            return None
-        value_node, lit_ty = lit
+            return
         if not self._match("SEMI"):
             self._expect_failed(";", "ctx_after_expr")
             self._synchronize_irons()
 
-        resolved = type_ann if type_ann is not None else lit_ty
-        if type_ann is not None and not self._types_compatible(type_ann, lit_ty):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_type_mismatch",
-                (type_ann, lit_ty),
-                self._literal_fragment(value_node),
-                self._literal_len(value_node),
-            )
-            return None
-
-        if isinstance(value_node, IntLiteralNode) and not self._int_in_range(value_node.value):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_int_out_of_range",
-                (value_node.value, MAX_INT32),
-                str(value_node.value),
-                max(len(str(value_node.value)), 1),
-            )
-            return None
-        if isinstance(value_node, FloatLiteralNode) and not self._float_ok(value_node.value):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_float_invalid",
-                (),
-                self._literal_fragment(value_node),
-                self._literal_len(value_node),
-            )
-            return None
-
-        ok, prev_line = self.sym.declare(name, "const", resolved, n_line)
-        if not ok:
-            self._add_error(
-                n_line,
-                n_col,
-                "sem_dup_ident",
-                (name, prev_line),
-                name,
-                max(len(name), 1),
-            )
-            return None
-
-        return ConstDeclNode(
-            line=kw.get("line", 1),
-            col=kw.get("col", 1),
-            name=name,
-            name_line=n_line,
-            name_col=n_col,
-            modifiers=["const"],
-            declared_type=type_ann,
-            resolved_type=resolved,
-            type_node=type_node,
-            value=value_node,
-        )
-
-    def _parse_var_decl(self) -> Optional[VarDeclNode]:
-        kw = self._current()
+    def _parse_var_decl(self):
         self._consume("KW_VAR")
         if not self._match("ID"):
             self._expect_failed("sym_identifier", "ctx_after_var")
             self._synchronize_irons()
-            return None
-        name_tok = self._at(self.pos - 1)
-        name = name_tok.get("lexeme", "")
-        n_line = name_tok.get("line", 1)
-        n_col = name_tok.get("col", 1)
-
-        type_ann, type_node, type_bad = self._parse_optional_type()
-        if type_bad:
-            return None
-
+            return
         if not self._match("ASSIGN"):
             self._expect_failed("=", "ctx_after_var_name")
             self._synchronize_irons()
-            return None
-        lit = self._parse_literal_expr()
-        if lit is None:
+            return
+        if not self._parse_literal_expr():
             self._synchronize_irons()
-            return None
-        value_node, lit_ty = lit
+            return
         if not self._match("SEMI"):
             self._expect_failed(";", "ctx_after_expr")
             self._synchronize_irons()
 
-        resolved = type_ann if type_ann is not None else lit_ty
-        if type_ann is not None and not self._types_compatible(type_ann, lit_ty):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_type_mismatch",
-                (type_ann, lit_ty),
-                self._literal_fragment(value_node),
-                self._literal_len(value_node),
-            )
-            return None
-
-        if isinstance(value_node, IntLiteralNode) and not self._int_in_range(value_node.value):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_int_out_of_range",
-                (value_node.value, MAX_INT32),
-                str(value_node.value),
-                max(len(str(value_node.value)), 1),
-            )
-            return None
-        if isinstance(value_node, FloatLiteralNode) and not self._float_ok(value_node.value):
-            self._add_error(
-                value_node.line,
-                value_node.col,
-                "sem_float_invalid",
-                (),
-                self._literal_fragment(value_node),
-                self._literal_len(value_node),
-            )
-            return None
-
-        ok, prev_line = self.sym.declare(name, "var", resolved, n_line)
-        if not ok:
-            self._add_error(
-                n_line,
-                n_col,
-                "sem_dup_ident",
-                (name, prev_line),
-                name,
-                max(len(name), 1),
-            )
-            return None
-
-        return VarDeclNode(
-            line=kw.get("line", 1),
-            col=kw.get("col", 1),
-            name=name,
-            name_line=n_line,
-            name_col=n_col,
-            modifiers=["var"],
-            declared_type=type_ann,
-            resolved_type=resolved,
-            type_node=type_node,
-            value=value_node,
-        )
-
-    @staticmethod
-    def _literal_fragment(node: LiteralNode) -> str:
-        if isinstance(node, IntLiteralNode):
-            return str(node.value)
-        return str(node.value)
-
-    @staticmethod
-    def _literal_len(node: LiteralNode) -> int:
-        return max(len(SyntaxParser._literal_fragment(node)), 1)
-
-    def _parse_literal_expr(self) -> Optional[Tuple[LiteralNode, str]]:
+    def _parse_literal_expr(self) -> bool:
         k = self._kind()
-        if k == "INT":
-            t = self._current()
+        if k in ("INT", "FLOAT"):
             self.pos += 1
-            v = int(t["lexeme"])
-            node = IntLiteralNode(value=v, line=t.get("line", 1), col=t.get("col", 1))
-            return node, "int"
-        if k == "FLOAT":
-            t = self._current()
-            self.pos += 1
-            v = float(t["lexeme"])
-            node = FloatLiteralNode(value=v, line=t.get("line", 1), col=t.get("col", 1))
-            return node, "float"
+            return True
         t = self._current()
         frag = t.get("lexeme", "") or ""
         self._add_error(
@@ -538,29 +536,6 @@ class SyntaxParser:
             frag[:32] if frag else "?",
             max(len(frag), 1),
         )
-        return None
-
-    def _int_literal_from_token(self, t: dict) -> IntLiteralNode:
-        return IntLiteralNode(
-            value=int(t["lexeme"]),
-            line=t.get("line", 1),
-            col=t.get("col", 1),
-        )
-
-    @staticmethod
-    def _int_in_range(v: int) -> bool:
-        return 0 <= v <= MAX_INT32
-
-    @staticmethod
-    def _float_ok(v: float) -> bool:
-        return math.isfinite(v) and abs(v) <= 1e308
-
-    @staticmethod
-    def _types_compatible(declared: str, literal_type: str) -> bool:
-        if declared == literal_type:
-            return True
-        if declared == "float" and literal_type == "int":
-            return True
         return False
 
     def _consume(self, kind):
@@ -597,10 +572,36 @@ class SyntaxParser:
         )
 
     def _add_error(self, line, col, key, args, fragment, frag_len):
+        if self.errors:
+            p_line, p_col, p_key, p_args, *_ = self.errors[-1]
+            if (p_line, p_col, p_key, p_args) == (line, col, key, args):
+                return
         self.errors.append((line, col, key, args, fragment, frag_len))
 
+    def _add_keyword_typo_error(self, keyword: str, shown_fragment: str):
+        t = self._current()
+        key = (
+            "syn_err_keyword_for_typo"
+            if keyword == "for"
+            else "syn_err_keyword_print_typo"
+        )
+        self._add_error(
+            t.get("line", 1),
+            t.get("col", 1),
+            key,
+            (shown_fragment,),
+            shown_fragment[:48],
+            max(len(shown_fragment), 1),
+        )
+
+    def _skip_error_token(self):
+        # Сдвиг после фиксации ошибки предотвращает повтор одной и той же диагностики.
+        if self._kind() != "EOF":
+            self.pos += 1
+
     def _synchronize_irons(self):
-        while self._kind() not in ("SEMI", "EOF"):
+        self._skip_error_token()
+        while self._kind() not in ("SEMI", "EOF", "KW_CONST", "KW_VAR", "KW_FOR"):
             self.pos += 1
         if self._kind() == "SEMI":
             self.pos += 1

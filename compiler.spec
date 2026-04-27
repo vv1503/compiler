@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['C:\\Users\\User\\Desktop\\compiler\\app\\compiler.py'],
+    ['app\\compiler.py'],
     pathex=[],
     binaries=[],
     datas=[],
