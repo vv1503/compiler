@@ -32,7 +32,7 @@ from ast_nodes import (
 
 
 class _AstGraphicsView(QGraphicsView):
-    """Масштаб колёсиком мыши (якорь под курсором)."""
+    """Масштаб колёсиком мыши."""
 
     def wheelEvent(self, event):
         if event.angleDelta().y() == 0:
@@ -70,7 +70,7 @@ def _ast_children_ordered(node: AstNode) -> List[AstNode]:
 
 
 def _node_caption_lines(node: AstNode) -> List[str]:
-    """Первая строка — тип узла; далее атрибуты в виде key=value (как в учебном примере ЛР)."""
+    """Первая строка - тип узла далее атрибуты в виде key=valuе."""
     kind = node.__class__.__name__
     if isinstance(node, ProgramNode):
         return [kind, f"body_count={len(node.body)}"]
@@ -180,7 +180,7 @@ def _collect_edges(root: AstNode) -> List[Tuple[AstNode, AstNode]]:
 
 
 class AstGraphDialog(QDialog):
-    """Иерархия AST: узлы — прямоугольники, рёбра — связь родитель—потомок (раскладка дерева сверху вниз)."""
+    """Иерархия AST: узлы - прямоугольники, рёбра - связь родитель—потомок"""
 
     def __init__(self, root: AstNode, tr: Callable[[str], str], parent: Optional[QWidget] = None):
         super().__init__(parent)
