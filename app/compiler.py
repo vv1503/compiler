@@ -38,19 +38,24 @@ from PyQt6.QtGui import (
     QIcon,
     QKeySequence,
     QAction,
-    QFont,
     QTextCharFormat,
     QColor,
     QPainter,
     QTextFormat,
     QSyntaxHighlighter,
-    QTextCursor  
+    QTextCursor,
+    QPalette,
+    QGuiApplication,
 )
 
-from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer
+from PyQt6.QtCore import Qt, QSize, QRect, QRegularExpression, QTimer, QEvent
 from translations import Translator
 from lexical_analyzer import LexicalAnalyzer
 from syntax_parser import SyntaxParser
+
+
+def _editor_palette_is_dark(palette: QPalette) -> bool:
+    return palette.color(QPalette.ColorGroup.Active, QPalette.ColorRole.Base).lightness() < 128
 
 
 # Нумерация строк
@@ -105,17 +110,23 @@ class CodeEditor(QPlainTextEdit):
 
     def paint_line_numbers(self, event):
         painter = QPainter(self.line_number_area)
-        painter.fillRect(event.rect(), QColor(240, 240, 240))
+        pal = self.palette()
+        ln_bg = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.AlternateBase)
+        painter.fillRect(event.rect(), ln_bg)
 
         block = self.firstVisibleBlock()
         block_number = block.blockNumber()
         top = self.blockBoundingGeometry(block).translated(self.contentOffset()).top()
         bottom = top + self.blockBoundingRect(block).height()
 
+        pen = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.PlaceholderText)
+        if not pen.isValid() or pen == ln_bg:
+            pen = pal.color(QPalette.ColorGroup.Active, QPalette.ColorRole.WindowText)
+
         while block.isValid() and top <= event.rect().bottom():
             if block.isVisible() and bottom >= event.rect().top():
                 number = str(block_number + 1)
-                painter.setPen(QColor(120, 120, 120))
+                painter.setPen(pen)
                 painter.drawText(0, int(top), self.line_number_area.width() - 5,
                                  self.fontMetrics().height(), Qt.AlignmentFlag.AlignRight, number)
             block = block.next()
@@ -127,12 +138,24 @@ class CodeEditor(QPlainTextEdit):
         extra = []
         if not self.isReadOnly():
             selection = QTextEdit.ExtraSelection()
-            selection.format.setBackground(QColor(230, 230, 255))
+            if _editor_palette_is_dark(self.palette()):
+                selection.format.setBackground(QColor(62, 68, 82))
+            else:
+                selection.format.setBackground(QColor(230, 230, 255))
             selection.format.setProperty(QTextFormat.Property.FullWidthSelection, True)
             selection.cursor = self.textCursor()
             selection.cursor.clearSelection()
             extra.append(selection)
         self.setExtraSelections(extra)
+
+    def changeEvent(self, event):
+        if event.type() == QEvent.Type.PaletteChange:
+            h = getattr(self, "_syntax_highlighter", None)
+            if h is not None:
+                h.rebuild_highlighting()
+            self.highlight_current_line()
+            self.line_number_area.update()
+        super().changeEvent(event)
 
     def keyPressEvent(self, event):
         if self.overwrite_mode and not event.modifiers() and len(event.text()) > 0:
@@ -141,32 +164,91 @@ class CodeEditor(QPlainTextEdit):
                 cursor.deleteChar()
         super().keyPressEvent(event)
 
-
-# Подсветка синтаксиса 
-from PyQt6.QtGui import QSyntaxHighlighter
+    def wheelEvent(self, event):
+        if event.modifiers() & Qt.KeyboardModifier.ControlModifier:
+            dy = event.angleDelta().y()
+            if dy != 0:
+                f = self.font()
+                ps = f.pointSizeF()
+                if ps <= 0:
+                    ps = float(f.pointSize() if f.pointSize() > 0 else 10)
+                step = 1.0 if dy > 0 else -1.0
+                new_ps = max(6.0, min(72.0, ps + step))
+                f.setPointSizeF(new_ps)
+                self.setFont(f)
+                self.update_line_number_area_width()
+                self.line_number_area.update()
+            event.accept()
+            return
+        super().wheelEvent(event)
 
 
 class SimpleSyntaxHighlighter(QSyntaxHighlighter):
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.highlighting_rules = []
+    """Подсветка синтаксиса; цвета подстраиваются под светлую/тёмную палитру редактора."""
 
-        keyword_format = QTextCharFormat()
-        keyword_format.setForeground(QColor("#569cd6"))
-        keyword_format.setFontWeight(QFont.Weight.Bold)
+    def __init__(self, document, editor=None):
+        super().__init__(document)
+        self._editor = editor
+        self.highlighting_rules: list = []
+        self.rebuild_highlighting()
 
-        keywords = ['var', 'const', 'if', 'else', 'while', 'for', 'return', 'true', 'false']
-        for word in keywords:
-            pattern = QRegularExpression(r'\b' + word + r'\b')
-            self.highlighting_rules.append((pattern, keyword_format))
+    def rebuild_highlighting(self):
+        self.highlighting_rules.clear()
+        dark = False
+        if self._editor is not None:
+            dark = _editor_palette_is_dark(self._editor.palette())
+
+        # Светлая тема — как в вашем образце (RGB); тёмная — те же оттенки, чуть ярче для контраста.
+        kw_c = QColor(120, 185, 245) if dark else QColor(86, 156, 214)
+        str_c = QColor(220, 165, 135) if dark else QColor(206, 145, 120)
+        com_c = QColor(125, 175, 105) if dark else QColor(106, 153, 85)
+        num_c = QColor(110, 200, 140) if dark else QColor(39, 107, 0)
 
         string_format = QTextCharFormat()
-        string_format.setForeground(QColor("#ce9178"))
+        string_format.setForeground(str_c)
         self.highlighting_rules.append((QRegularExpression(r'"[^"\\]*(\\.[^"\\]*)*"'), string_format))
+        self.highlighting_rules.append((QRegularExpression(r"'[^'\\]*(\\.[^'\\]*)*'"), string_format))
+
+        keyword_format = QTextCharFormat()
+        keyword_format.setForeground(kw_c)
+        keywords = [
+            "var",
+            "const",
+            "if",
+            "else",
+            "while",
+            "for",
+            "in",
+            "print",
+            "return",
+            "true",
+            "false",
+            "int",
+            "float",
+            "string",
+        ]
+        for word in keywords:
+            pattern = QRegularExpression(r"\b" + word + r"\b")
+            self.highlighting_rules.append((pattern, keyword_format))
+
+        number_format = QTextCharFormat()
+        number_format.setForeground(num_c)
+        self.highlighting_rules.append((QRegularExpression(r"\b\d+(?:\.\d+)?\b"), number_format))
 
         comment_format = QTextCharFormat()
-        comment_format.setForeground(QColor("#6a9955"))
+        comment_format.setForeground(com_c)
         self.highlighting_rules.append((QRegularExpression(r"//.*"), comment_format))
+        self.highlighting_rules.append(
+            (
+                QRegularExpression(
+                    r"/\*.*?\*/",
+                    QRegularExpression.PatternOption.DotMatchesEverythingOption,
+                ),
+                comment_format,
+            )
+        )
+
+        self.rehighlight()
 
     def highlightBlock(self, text):
         for pattern, fmt in self.highlighting_rules:
@@ -376,6 +458,18 @@ class Compiler(QMainWindow):
 
         self.update_cursor_position()
         self.update_text_stats()
+        self._connect_os_theme_signals()
+
+    def _connect_os_theme_signals(self) -> None:
+        hints = QGuiApplication.styleHints()
+        if hasattr(hints, "colorSchemeChanged"):
+            hints.colorSchemeChanged.connect(self._on_os_theme_changed)
+
+    def _on_os_theme_changed(self, *_args) -> None:
+        if hasattr(self, "syntax_highlighter"):
+            self.syntax_highlighter.rebuild_highlighting()
+        self.editor.highlight_current_line()
+        self.editor.line_number_area.update()
 
     def init_ui(self):
         central = QWidget()
@@ -387,7 +481,8 @@ class Compiler(QMainWindow):
         layout.addWidget(self.splitter)
 
         self.editor = CodeEditor()
-        highlighter = SimpleSyntaxHighlighter(self.editor.document())
+        self.syntax_highlighter = SimpleSyntaxHighlighter(self.editor.document(), self.editor)
+        self.editor._syntax_highlighter = self.syntax_highlighter
         self.splitter.addWidget(self.editor)
 
         # Область результатов
@@ -432,6 +527,69 @@ class Compiler(QMainWindow):
         results_layout.addWidget(self.syntax_error_count_label)
         self.splitter.addWidget(self.results_widget)
         self.splitter.setSizes([550, 200])
+
+        for w in (
+            self.tokens_table,
+            self.errors_table,
+            self.results_tabs,
+            self.syntax_status_label,
+            self.syntax_error_count_label,
+        ):
+            w.installEventFilter(self)
+        self._init_results_area_font_size()
+
+    def _init_results_area_font_size(self) -> None:
+        f = self.tokens_table.font()
+        ps = f.pointSizeF()
+        self._results_font_size = float(ps if ps > 0 else max(1, f.pointSize() or 9))
+        f.setPointSizeF(self._results_font_size)
+        self._apply_results_area_font(f)
+
+    def _apply_results_area_font(self, f) -> None:
+        for w in (
+            self.tokens_table,
+            self.errors_table,
+            self.results_tabs,
+            self.syntax_status_label,
+            self.syntax_error_count_label,
+        ):
+            w.setFont(f)
+        for tbl in (self.tokens_table, self.errors_table):
+            tbl.horizontalHeader().setFont(f)
+            for r in range(tbl.rowCount()):
+                for c in range(tbl.columnCount()):
+                    it = tbl.item(r, c)
+                    if it is not None:
+                        it.setFont(f)
+
+    def _zoom_results_panel_font(self, dy: int) -> None:
+        if dy == 0:
+            return
+        self._results_font_size = max(6.0, min(72.0, self._results_font_size + (1.0 if dy > 0 else -1.0)))
+        f = self.tokens_table.font()
+        f.setPointSizeF(self._results_font_size)
+        self._apply_results_area_font(f)
+
+    def _results_table_item(self, text: str) -> QTableWidgetItem:
+        it = QTableWidgetItem(text)
+        it.setFont(self.tokens_table.font())
+        return it
+
+    def eventFilter(self, obj, event):
+        if event.type() == QEvent.Type.Wheel:
+            w_evt = event
+            if w_evt.modifiers() & Qt.KeyboardModifier.ControlModifier:
+                if obj in (
+                    self.tokens_table,
+                    self.errors_table,
+                    self.results_tabs,
+                    self.syntax_status_label,
+                    self.syntax_error_count_label,
+                ):
+                    self._zoom_results_panel_font(w_evt.angleDelta().y())
+                    w_evt.accept()
+                    return True
+        return super().eventFilter(obj, event)
 
     def go_to_error(self, row, column):
         item = self.errors_table.item(row, 0)
@@ -815,11 +973,11 @@ class Compiler(QMainWindow):
         for t in tokens:
             row = self.tokens_table.rowCount()
             self.tokens_table.insertRow(row)
-            self.tokens_table.setItem(row, 0, QTableWidgetItem(str(t["code"])))
-            self.tokens_table.setItem(row, 1, QTableWidgetItem(self.tr(t["type"])))
-            self.tokens_table.setItem(row, 2, QTableWidgetItem(self._tr_lexeme(t["lexeme"])))
+            self.tokens_table.setItem(row, 0, self._results_table_item(str(t["code"])))
+            self.tokens_table.setItem(row, 1, self._results_table_item(self.tr(t["type"])))
+            self.tokens_table.setItem(row, 2, self._results_table_item(self._tr_lexeme(t["lexeme"])))
             loc = self.tr("token_loc_fmt").format(t["line"], t["col"], t["end_col"])
-            self.tokens_table.setItem(row, 3, QTableWidgetItem(loc))
+            self.tokens_table.setItem(row, 3, self._results_table_item(loc))
 
         parser = SyntaxParser(tokens, lex_errors=lex_errors, source_text=text)
         syn_errors = parser.parse()
@@ -872,8 +1030,16 @@ class Compiler(QMainWindow):
             return self.tr(key).format(args[0])
         if key == "syn_err_missing_lbrace_for":
             return self.tr("syn_err_missing_lbrace_for")
+        if key == "syn_err_duplicate_kw_consecutive":
+            return self.tr("syn_err_duplicate_kw_consecutive").format(args[0])
+        if key == "syn_err_for_expected_lbrace_got":
+            return self.tr("syn_err_for_expected_lbrace_got").format(args[0] if args else "")
         if key == "syn_err_in_without_loop_var":
             return self.tr("syn_err_in_without_loop_var")
+        if key == "syn_err_for_illegal_semicolon":
+            return self.tr("syn_err_for_illegal_semicolon")
+        if key == "syn_err_range_expected_colon_got":
+            return self.tr("syn_err_range_expected_colon_got").format(args[0] if args else "")
         if key == "syn_err_range_missing_colon_between":
             return self.tr("syn_err_range_missing_colon_between")
         if key == "syn_err_range_missing_colon_in_literal":
@@ -886,6 +1052,16 @@ class Compiler(QMainWindow):
             return self.tr("syn_err_range_missing_end")
         if key == "syn_err_range_bounds_order":
             return self.tr("syn_err_range_bounds_order").format(args[0], args[1])
+        if key == "syn_err_range_expected_int":
+            return self.tr("syn_err_range_expected_int").format(args[0])
+        if key == "syn_err_for_junk_before_lparen":
+            return self.tr("syn_err_for_junk_before_lparen").format(args[0])
+        if key == "syn_err_for_duplicate_loop_var":
+            return self.tr("syn_err_for_duplicate_loop_var").format(args[0])
+        if key == "syn_err_for_junk_before_lbrace":
+            return self.tr("syn_err_for_junk_before_lbrace").format(args[0])
+        if key == "syn_err_block_extra_token":
+            return self.tr("syn_err_block_extra_token").format(args[0])
         if key == "syn_err_duplicate_fragment":
             return self.tr("syn_err_duplicate_fragment").format(args[0])
         if key == "sem_err_print_arg_not_loop_var":
@@ -930,11 +1106,11 @@ class Compiler(QMainWindow):
         loc = self.tr("loc_fmt").format(line, col)
         row = self.errors_table.rowCount()
         self.errors_table.insertRow(row)
-        frag_item = QTableWidgetItem(str(fragment))
+        frag_item = self._results_table_item(str(fragment))
         frag_item.setData(Qt.ItemDataRole.UserRole, (line, col, max(int(frag_len), 0)))
         self.errors_table.setItem(row, 0, frag_item)
-        self.errors_table.setItem(row, 1, QTableWidgetItem(loc))
-        self.errors_table.setItem(row, 2, QTableWidgetItem(msg))
+        self.errors_table.setItem(row, 1, self._results_table_item(loc))
+        self.errors_table.setItem(row, 2, self._results_table_item(msg))
 
     def add_error(self, line: int, col: int, message: str):
         self._append_syntax_error_row((line, col, message, "?", 1))
