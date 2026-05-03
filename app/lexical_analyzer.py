@@ -167,6 +167,33 @@ class LexicalAnalyzer:
         """Объединяет отдельные lex_err_bad_char в более понятные сообщения (for@for, i@n)."""
         if not text or not errors:
             return errors
+
+        def is_near_keyword(word: str, keyword: str) -> bool:
+            if not word:
+                return False
+            if word == keyword:
+                return True
+            if abs(len(word) - len(keyword)) > 1:
+                return False
+            i = j = edits = 0
+            while i < len(word) and j < len(keyword):
+                if word[i] == keyword[j]:
+                    i += 1
+                    j += 1
+                    continue
+                edits += 1
+                if edits > 1:
+                    return False
+                if len(word) == len(keyword):
+                    i += 1
+                    j += 1
+                elif len(word) > len(keyword):
+                    i += 1
+                else:
+                    j += 1
+            edits += (len(word) - i) + (len(keyword) - j)
+            return edits <= 1
+
         lines = text.splitlines()
         nt = [t for t in tokens if t.get("kind") != "WS"]
         merged = []
@@ -228,6 +255,20 @@ class LexicalAnalyzer:
                     )
                     used.add(ei)
                     continue
+                # f@@@r / pr@@int / i@@n: не показываем каждый lex_err_bad_char отдельно.
+                if pk == "ID" and nk == "ID" and ple < C < nsc:
+                    left = (prev_tok.get("lexeme") or "")
+                    right = (next_tok.get("lexeme") or "")
+                    joined = left + right
+                    keywords = ("for", "print", "in")
+                    if any(is_near_keyword(joined, kw) for kw in keywords):
+                        for ej, e2 in enumerate(errors):
+                            if ej in used or len(e2) < 6:
+                                continue
+                            l2, c2, k2, *_ = e2
+                            if int(l2) == L and k2 == "lex_err_bad_char" and ple < int(c2) < nsc:
+                                used.add(ej)
+                        continue
                 if (
                     pk == "ID"
                     and nk == "ID"

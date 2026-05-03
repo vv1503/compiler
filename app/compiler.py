@@ -821,7 +821,7 @@ class Compiler(QMainWindow):
             loc = self.tr("token_loc_fmt").format(t["line"], t["col"], t["end_col"])
             self.tokens_table.setItem(row, 3, QTableWidgetItem(loc))
 
-        parser = SyntaxParser(tokens, lex_errors=lex_errors)
+        parser = SyntaxParser(tokens, lex_errors=lex_errors, source_text=text)
         syn_errors = parser.parse()
 
         all_errors = list(lex_errors) + list(syn_errors)
@@ -868,7 +868,7 @@ class Compiler(QMainWindow):
             return self.tr("lex_err_noise_duplicate_kw").format(args[0], args[1])
         if key == "lex_err_noise_inside_in":
             return self.tr("lex_err_noise_inside_in").format(args[0])
-        if key in ("syn_err_keyword_for_typo", "syn_err_keyword_print_typo"):
+        if key in ("syn_err_keyword_for_typo", "syn_err_keyword_print_typo", "syn_err_keyword_in_typo"):
             return self.tr(key).format(args[0])
         if key == "syn_err_missing_lbrace_for":
             return self.tr("syn_err_missing_lbrace_for")
@@ -880,6 +880,14 @@ class Compiler(QMainWindow):
             return self.tr("syn_err_range_missing_colon_in_literal").format(args[0])
         if key == "syn_err_range_missing_upper_bound":
             return self.tr("syn_err_range_missing_upper_bound").format(args[0])
+        if key == "syn_err_range_missing_start":
+            return self.tr("syn_err_range_missing_start")
+        if key == "syn_err_range_missing_end":
+            return self.tr("syn_err_range_missing_end")
+        if key == "syn_err_range_bounds_order":
+            return self.tr("syn_err_range_bounds_order").format(args[0], args[1])
+        if key == "syn_err_duplicate_fragment":
+            return self.tr("syn_err_duplicate_fragment").format(args[0])
         if key == "sem_err_print_arg_not_loop_var":
             return self.tr("sem_err_print_arg_not_loop_var").format(args[0], args[1])
         if args:
@@ -892,6 +900,7 @@ class Compiler(QMainWindow):
         return lexeme
 
     def _append_syntax_error_row(self, err):
+        key = None
         if len(err) == 6:
             line, col, key, args, fragment, frag_len = err
             msg = self._format_analysis_msg(key, args)
@@ -903,11 +912,26 @@ class Compiler(QMainWindow):
             fragment = "?"
             frag_len = 1
             msg = self.tr(msg) if isinstance(msg, str) else str(msg)
+
+        missing_keys = {
+            "syn_expect_failed",
+            "syn_err_missing_lbrace_for",
+            "syn_err_in_without_loop_var",
+            "syn_err_range_missing_start",
+            "syn_err_range_missing_end",
+            "syn_err_range_missing_colon_between",
+            "syn_err_range_missing_colon_in_literal",
+            "syn_err_range_missing_upper_bound",
+        }
+        if key in missing_keys:
+            fragment = ""
+            frag_len = 0
+
         loc = self.tr("loc_fmt").format(line, col)
         row = self.errors_table.rowCount()
         self.errors_table.insertRow(row)
         frag_item = QTableWidgetItem(str(fragment))
-        frag_item.setData(Qt.ItemDataRole.UserRole, (line, col, max(frag_len, 1)))
+        frag_item.setData(Qt.ItemDataRole.UserRole, (line, col, max(int(frag_len), 0)))
         self.errors_table.setItem(row, 0, frag_item)
         self.errors_table.setItem(row, 1, QTableWidgetItem(loc))
         self.errors_table.setItem(row, 2, QTableWidgetItem(msg))

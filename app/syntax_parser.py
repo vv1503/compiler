@@ -4,11 +4,13 @@ from __future__ import annotations
 class SyntaxParser:
     SYNC_KINDS = frozenset({"SEMI"})
 
-    def __init__(self, tokens, lex_errors=None):
+    def __init__(self, tokens, lex_errors=None, source_text: str = ""):
         filtered = [t for t in tokens if t.get("kind") != "WS"]
         self.tokens = filtered
         self.pos = 0
         self.errors = []
+        self.source_text = source_text or ""
+        self._source_lines = self.source_text.splitlines()
         self._lex_error_cols = {}
         for err in (lex_errors or []):
             if len(err) < 2:
@@ -74,6 +76,14 @@ class SyntaxParser:
             self._parse_for_stmt(require_trailing_semi=True)
         elif k == "ID" and self._consume_near_keyword("for"):
             self._parse_for_stmt_core(require_trailing_semi=True, typo_recovered=True)
+        elif k == "LPAREN":
+            # Восстановление: пропущено ключевое слово for перед заголовком "(...)"
+            self._expect_failed("for", "")
+            self._parse_for_stmt_core(
+                require_trailing_semi=True,
+                typo_recovered=True,
+                suppress_in_without_loop_var=True,
+            )
         else:
             t = self._current()
             frag = t.get("lexeme", "") or ""
@@ -91,13 +101,18 @@ class SyntaxParser:
         self._consume("KW_FOR")
         self._parse_for_stmt_core(require_trailing_semi=require_trailing_semi, typo_recovered=False)
 
-    def _parse_for_stmt_core(self, require_trailing_semi: bool = False, typo_recovered: bool = False):
+    def _parse_for_stmt_core(
+        self,
+        require_trailing_semi: bool = False,
+        typo_recovered: bool = False,
+        suppress_in_without_loop_var: bool = False,
+    ):
         self._skip_duplicated_keyword_after_lex_error("for")
+        self._consume_duplicate_keyword_tokens("for")
         if not self._match("LPAREN"):
             self._expect_failed("(", "ctx_after_for")
-            # Не принимаем токен на месте «(» за начало корректного заголовка — сдвигаемся дальше.
-            if self._kind() != "EOF":
-                self.pos += 1
+            if self._kind() == "EOF":
+                return
         id_ok = self._match("ID")
         loop_var: str | None = None
         if id_ok:
@@ -106,15 +121,22 @@ class SyntaxParser:
         if not id_ok:
             # Сразу «in» без имени переменной (например после пропуска «i» в «fr i in …»)
             if self._kind() == "KW_IN" and (self._current().get("lexeme") or "").lower() == "in":
-                t = self._current()
-                self._add_error(
-                    t.get("line", 1),
-                    t.get("col", 1),
-                    "syn_err_in_without_loop_var",
-                    (),
-                    "in",
-                    max(len(t.get("lexeme", "") or "in"), 2),
-                )
+                if not suppress_in_without_loop_var:
+                    t = self._current()
+                    err_line = int(t.get("line", 1))
+                    err_col = int(t.get("col", 1))
+                    if self.pos > 0:
+                        prev = self._at(self.pos - 1)
+                        if int(prev.get("line", 1)) == err_line:
+                            err_col = int(prev.get("end_col", prev.get("col", 1))) + 1
+                    self._add_error(
+                        err_line,
+                        err_col,
+                        "syn_err_in_without_loop_var",
+                        (),
+                        "",
+                        0,
+                    )
                 self.pos += 1
                 in_ok = True
             else:
@@ -124,7 +146,7 @@ class SyntaxParser:
                     id_ok = self._match("ID")
 
         if id_ok and not in_ok:
-            in_ok = self._match("KW_IN") or self._consume_damaged_in_splits()
+            in_ok = self._match("KW_IN") or self._consume_damaged_in_splits() or self._consume_near_keyword("in")
 
         if not in_ok:
             self._expect_failed("in", "ctx_after_loop_var")
@@ -134,84 +156,36 @@ class SyntaxParser:
             if self._kind() == "ID":
                 self.pos += 1
 
-        self._expect_or_report("INT", "sym_integer", "ctx_range_start", consume_if_stuck=True)
-        prev_int = self._at(self.pos - 1)
-        recovered_single_literal = False
-        if not self._match("COLON"):
-            if self._kind() == "RPAREN" and prev_int.get("kind") == "INT":
-                lit = (prev_int.get("lexeme") or "")
-                if lit.isdigit():
-                    pline = int(prev_int.get("line", 1))
-                    pcol = int(prev_int.get("col", 1))
-                    pend = int(prev_int.get("end_col", pcol))
-                    ccol = pcol + 1 if pend > pcol else pcol
-                    self._add_error(
-                        pline,
-                        ccol,
-                        "syn_err_range_missing_colon_in_literal",
-                        (lit,),
-                        ":",
-                        1,
-                    )
-                    self._add_error(
-                        pline,
-                        pend,
-                        "syn_err_range_missing_upper_bound",
-                        (lit,),
-                        lit,
-                        max(len(lit), 1),
-                    )
-                    recovered_single_literal = True
-            if not recovered_single_literal:
-                prev = self._at(self.pos - 1)
-                if (
-                    self._kind() == "INT"
-                    and prev.get("kind") == "INT"
-                    and int(self._current().get("line", 1)) == int(prev.get("line", 1))
-                ):
-                    gap = int(self._current().get("col", 1)) - int(
-                        prev.get("end_col", prev.get("col", 1))
-                    )
-                    if gap >= 1:
-                        ln = int(prev.get("line", 1))
-                        cl = int(prev.get("end_col", prev.get("col", 1))) + 1
-                        self._add_error(
-                            ln,
-                            cl,
-                            "syn_err_range_missing_colon_between",
-                            (),
-                            ":",
-                            1,
-                        )
-                self._expect_failed(":", "ctx_in_range")
-                t = self._current()
-                line, col = int(t.get("line", 1)), int(t.get("col", 1))
-                if self._kind() != "EOF":
-                    t_after = self._current()
-                    if int(t_after.get("line", 1)) == line and int(t_after.get("col", 1)) == col:
-                        self.pos += 1
-        if not recovered_single_literal:
-            self._expect_or_report("INT", "sym_integer", "ctx_range_end", consume_if_stuck=True)
-            self._skip_split_range_tail()
-        self._expect_or_report("RPAREN", ")", "ctx_after_range", consume_if_stuck=True)
+        start_num, end_num = self._parse_for_range_bounds()
+        if start_num is not None and end_num is not None and start_num >= end_num:
+            t = self._at(self.pos - 1)
+            self._add_error(
+                int(t.get("line", 1)),
+                int(t.get("col", 1)),
+                "syn_err_range_bounds_order",
+                (str(start_num), str(end_num)),
+                t.get("lexeme", "") or str(end_num),
+                max(len(t.get("lexeme", "") or str(end_num)), 1),
+            )
+        self._expect_or_report("RPAREN", ")", "ctx_after_range", consume_if_stuck=False)
 
         self._for_loop_var_stack.append(loop_var)
         try:
-            # Тело цикла по грамматике всегда в «{ … }»; не скрываем ошибку, даже если дальше похоже на print/for.
             if not self._match("LBRACE"):
                 prev = self._at(self.pos - 1)
-                # Явное сообщение об отсутствии «{» — для нормального for (KW_FOR) после «)».
-                # При восстановлении из опечатки (f@o и т.п.) не дублируем, если дальше явное тело.
                 if prev.get("kind") == "RPAREN" and not typo_recovered:
                     ln = int(prev.get("line", 1))
                     cl = int(prev.get("end_col", prev.get("col", 1))) + 1
                     self._add_error(ln, cl, "syn_err_missing_lbrace_for", (), "{", 1)
-                elif not (typo_recovered and self._looks_like_block_stmt_start()):
+                else:
                     self._expect_failed("{", "ctx_before_loop_body")
             self._parse_block_stmt_list()
             self._expect_or_report("RBRACE", "}", "ctx_end_loop_body")
             if require_trailing_semi:
-                self._expect_or_report("SEMI", ";", "ctx_after_for_brace")
+                if not self._match("SEMI"):
+                    self._expect_failed(";", "ctx_after_for_brace")
+                    if self._kind() == "COLON":
+                        self.pos += 1
             elif self._kind() == "SEMI":
                 self.pos += 1
         finally:
@@ -219,6 +193,19 @@ class SyntaxParser:
 
     def _parse_block_stmt_list(self):
         while self._kind() not in ("RBRACE", "EOF"):
+            if self._kind() == "LBRACE":
+                t = self._current()
+                frag = t.get("lexeme", "") or "{"
+                self._add_error(
+                    t.get("line", 1),
+                    t.get("col", 1),
+                    "syn_err_duplicate_fragment",
+                    (frag,),
+                    frag,
+                    max(len(frag), 1),
+                )
+                self.pos += 1
+                continue
             if self._kind() == "KW_PRINT":
                 self._parse_print_stmt()
             elif self._kind() == "KW_FOR":
@@ -252,6 +239,7 @@ class SyntaxParser:
         self._parse_print_stmt_core()
 
     def _parse_print_stmt_core(self):
+        self._consume_duplicate_keyword_tokens("print")
         self._expect_or_report("LPAREN", "(", "ctx_after_print")
         if self._match("ID"):
             arg_tok = self._at(self.pos - 1)
@@ -306,6 +294,106 @@ class SyntaxParser:
         if self._at(self.pos + 1).get("kind") == "RPAREN":
             self.pos += 1
 
+    def _parse_for_range_bounds(self):
+        start_num = None
+        end_num = None
+
+        # Отсутствие начала диапазона: for (i in :10)
+        if self._kind() == "COLON":
+            t = self._current()
+            self._add_error(
+                int(t.get("line", 1)),
+                int(t.get("col", 1)),
+                "syn_err_range_missing_start",
+                (),
+                "",
+                0,
+            )
+            self.pos += 1
+            if self._kind() == "INT":
+                end_tok = self._current()
+                end_lex = end_tok.get("lexeme", "") or ""
+                if end_lex.isdigit():
+                    end_num = int(end_lex)
+                self.pos += 1
+            else:
+                self._add_error(
+                    int(t.get("line", 1)),
+                    int(t.get("col", 1)) + 1,
+                    "syn_err_range_missing_end",
+                    (),
+                    "",
+                    0,
+                )
+            return start_num, end_num
+
+        if self._kind() != "INT":
+            self._expect_failed("sym_integer", "ctx_range_start")
+            if self._kind() not in ("RPAREN", "EOF"):
+                self.pos += 1
+            return start_num, end_num
+
+        start_tok = self._current()
+        start_lex = start_tok.get("lexeme", "") or ""
+        if start_lex.isdigit():
+            start_num = int(start_lex)
+        self.pos += 1
+
+        if self._match("COLON"):
+            if self._kind() == "INT":
+                end_tok = self._current()
+                end_lex = end_tok.get("lexeme", "") or ""
+                if end_lex.isdigit():
+                    end_num = int(end_lex)
+                self.pos += 1
+                self._skip_split_range_tail()
+                return start_num, end_num
+            self._add_error(
+                int(start_tok.get("line", 1)),
+                int(start_tok.get("end_col", start_tok.get("col", 1))) + 1,
+                "syn_err_range_missing_end",
+                (),
+                "",
+                0,
+            )
+            return start_num, end_num
+
+        # Отсутствие ':' между числами, включая случай с пробелом: "1 10"
+        if self._kind() == "INT":
+            self._add_error(
+                int(start_tok.get("line", 1)),
+                int(start_tok.get("end_col", start_tok.get("col", 1))) + 1,
+                "syn_err_range_missing_colon_between",
+                (),
+                "",
+                0,
+            )
+            end_tok = self._current()
+            end_lex = end_tok.get("lexeme", "") or ""
+            if end_lex.isdigit():
+                end_num = int(end_lex)
+            self.pos += 1
+            return start_num, end_num
+
+        # Один литерал без ':' и правой границы: "1)"
+        self._add_error(
+            int(start_tok.get("line", 1)),
+            int(start_tok.get("end_col", start_tok.get("col", 1))) + 1,
+            "syn_err_range_missing_colon_in_literal",
+            (start_lex,),
+            "",
+            0,
+        )
+        self._add_error(
+            int(start_tok.get("line", 1)),
+            int(start_tok.get("end_col", start_tok.get("col", 1))),
+            "syn_err_range_missing_upper_bound",
+            (start_lex,),
+            "",
+            0,
+        )
+        return start_num, end_num
+
     def _consume_damaged_in_splits(self) -> bool:
         cur = self._current()
         if cur.get("kind") != "ID":
@@ -324,6 +412,8 @@ class SyntaxParser:
                 and (nxt.get("lexeme", "") or "") == "n"
                 and self._has_lex_error_between(cur, nxt)
             ):
+                shown = self._extract_source_fragment(cur, nxt) or "i...n"
+                self._add_keyword_typo_error("in", shown)
                 self.pos += 2
                 return True
         if cur_lex == "n":
@@ -333,6 +423,8 @@ class SyntaxParser:
                 and (prev.get("lexeme", "") or "") == "i"
                 and self._has_lex_error_between(prev, cur)
             ):
+                shown = self._extract_source_fragment(prev, cur) or "i...n"
+                self._add_keyword_typo_error("in", shown)
                 self.pos += 1
                 return True
         return False
@@ -378,10 +470,26 @@ class SyntaxParser:
             self.pos += 1
             return True
 
+        # Склейка из двух одинаковых ключевых слов: forfor, printprint.
+        if lex == keyword * 2:
+            self._add_duplicate_fragment_error(t, lex)
+            self.pos += 1
+            return True
+
+        # Частичный дубль, например rintprint (почти "print" + "print").
+        if len(lex) > len(keyword) and lex.endswith(keyword):
+            head = lex[:-len(keyword)]
+            if self._is_near_keyword(head, keyword):
+                self._add_duplicate_fragment_error(t, lex)
+                self.pos += 1
+                return True
+
         joined = lex
+        parts = [lex]
         consumed = 1
         line = t.get("line")
         prev = t
+        had_lex_noise = False
         max_parts = min(len(keyword) + 1, 6)
         while consumed < max_parts:
             nxt = self._at(self.pos + consumed)
@@ -393,11 +501,19 @@ class SyntaxParser:
             if gap < 1 or gap > 4:
                 break
             joined += (nxt.get("lexeme", "") or "")
+            parts.append(nxt.get("lexeme", "") or "")
+            if gap > 1:
+                had_lex_noise = True
+            if self._has_lex_error_between(prev, nxt):
+                had_lex_noise = True
             consumed += 1
             prev = nxt
             if self._is_near_keyword(joined, keyword):
-                if joined != keyword:
-                    self._add_keyword_typo_error(keyword, joined)
+                if joined != keyword or had_lex_noise:
+                    shown = self._extract_source_fragment(t, nxt)
+                    if not shown:
+                        shown = joined if joined != keyword else ("...".join(parts))
+                    self._add_keyword_typo_error(keyword, shown)
                 self.pos += consumed
                 return True
 
@@ -580,11 +696,12 @@ class SyntaxParser:
 
     def _add_keyword_typo_error(self, keyword: str, shown_fragment: str):
         t = self._current()
-        key = (
-            "syn_err_keyword_for_typo"
-            if keyword == "for"
-            else "syn_err_keyword_print_typo"
-        )
+        if keyword == "for":
+            key = "syn_err_keyword_for_typo"
+        elif keyword == "print":
+            key = "syn_err_keyword_print_typo"
+        else:
+            key = "syn_err_keyword_in_typo"
         self._add_error(
             t.get("line", 1),
             t.get("col", 1),
@@ -593,6 +710,37 @@ class SyntaxParser:
             shown_fragment[:48],
             max(len(shown_fragment), 1),
         )
+
+    def _extract_source_fragment(self, start_tok, end_tok) -> str:
+        line = int(start_tok.get("line", 1))
+        if line != int(end_tok.get("line", 1)):
+            return ""
+        if line < 1 or line > len(self._source_lines):
+            return ""
+        start_col = int(start_tok.get("col", 1))
+        end_col = int(end_tok.get("end_col", end_tok.get("col", 1)))
+        if end_col < start_col:
+            return ""
+        line_text = self._source_lines[line - 1]
+        # col -> 1-based, slice -> 0-based inclusive end
+        return line_text[start_col - 1:end_col]
+
+    def _add_duplicate_fragment_error(self, tok, fragment: str):
+        self._add_error(
+            tok.get("line", 1),
+            tok.get("col", 1),
+            "syn_err_duplicate_fragment",
+            (fragment,),
+            fragment[:48],
+            max(len(fragment), 1),
+        )
+
+    def _consume_duplicate_keyword_tokens(self, keyword: str):
+        while self._token_is_keyword_like(self._current(), keyword):
+            tok = self._current()
+            frag = (tok.get("lexeme", "") or keyword)
+            self._add_duplicate_fragment_error(tok, frag)
+            self.pos += 1
 
     def _skip_error_token(self):
         # Сдвиг после фиксации ошибки предотвращает повтор одной и той же диагностики.
