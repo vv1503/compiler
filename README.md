@@ -121,7 +121,7 @@ m + n % k
 
 ### Диаграмма лексера 
 
-![](screenshots/lab6_lex.png.png)
+![](screenshots/lab6_lex.png)
 
 ### Схема рекурсивного спуска для парсера
 
