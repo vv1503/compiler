@@ -31,6 +31,8 @@ from PyQt6.QtWidgets import (
     QPushButton,
     QGroupBox,
     QLineEdit,
+    QScrollArea,
+    QFrame,
 )
 
 from PyQt6.QtGui import (
@@ -52,8 +54,9 @@ from translations import Translator
 from lexical_analyzer import LexicalAnalyzer
 from syntax_parser import SyntaxParser
 from lab6_expression_analyzer import analyze_expression
-from ast_nodes import ast_to_json, format_ast_tree
+from ast_nodes import ast_to_json, format_ast_tree, IntLiteralNode
 from ast_visual_view import AstGraphDialog
+from for_loop_ir import collect_for_nodes, build_for_ir_pipeline, tac_to_quad_rows
 
 
 class LineNumberArea(QWidget):
@@ -764,6 +767,23 @@ class Compiler(QMainWindow):
         ast_tab_layout.addWidget(self.btn_show_ast)
         self.results_tabs.addTab(self.ast_tab, self.tr("AST"))
 
+        self.for_ir_tab = QWidget()
+        for_ir_layout = QVBoxLayout(self.for_ir_tab)
+        for_ir_layout.setContentsMargins(4, 4, 4, 4)
+        self.for_ir_info = QLabel(self.tr("for_ir_placeholder"))
+        self.for_ir_info.setWordWrap(True)
+        self.for_ir_info.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        for_ir_layout.addWidget(self.for_ir_info)
+        self.for_ir_scroll = QScrollArea()
+        self.for_ir_scroll.setWidgetResizable(True)
+        self.for_ir_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.for_ir_scroll_content = QWidget()
+        self.for_ir_sections_layout = QVBoxLayout(self.for_ir_scroll_content)
+        self.for_ir_sections_layout.setContentsMargins(0, 0, 0, 0)
+        self.for_ir_scroll.setWidget(self.for_ir_scroll_content)
+        for_ir_layout.addWidget(self.for_ir_scroll, 1)
+        self.results_tabs.addTab(self.for_ir_tab, self.tr("IR"))
+
         self.errors_table = QTableWidget()
         self.errors_table.setColumnCount(3)
         self.errors_table.setHorizontalHeaderLabels([
@@ -896,7 +916,7 @@ class Compiler(QMainWindow):
                 return
             matches = RegexSearchEngine.search_literal(text, needle)
             search_name = self.tr("Обычный поиск")
-            results_tab_idx = 5
+            results_tab_idx = 6
         else:
             if mode == "regex":
                 search_type = self.regex_combo.currentData()
@@ -911,11 +931,11 @@ class Compiler(QMainWindow):
                     search_name = self.tr("Числа")
                 else:
                     return
-                results_tab_idx = 5
+                results_tab_idx = 6
             elif mode == "automaton":
                 matches = RegexSearchEngine.search_inn_automaton(text)
                 search_name = self.tr("ИНН (автомат)")
-                results_tab_idx = 6
+                results_tab_idx = 7
             else:
                 return
 
@@ -1279,11 +1299,14 @@ class Compiler(QMainWindow):
 
         self.results_tabs.setTabText(0, self.tr("Лексемы"))
         self.results_tabs.setTabText(1, self.tr("AST"))
-        self.results_tabs.setTabText(2, self.tr("Ошибки"))
-        self.results_tabs.setTabText(3, self.tr("Тетрады"))
-        self.results_tabs.setTabText(4, self.tr("ПОЛИЗ"))
-        self.results_tabs.setTabText(5, self.tr("Результаты поиска"))
-        self.results_tabs.setTabText(6, self.tr("Автомат"))
+        self.results_tabs.setTabText(2, self.tr("IR"))
+        self.results_tabs.setTabText(3, self.tr("Ошибки"))
+        self.results_tabs.setTabText(4, self.tr("Тетрады"))
+        self.results_tabs.setTabText(5, self.tr("ПОЛИЗ"))
+        self.results_tabs.setTabText(6, self.tr("Результаты поиска"))
+        self.results_tabs.setTabText(7, self.tr("Автомат"))
+        if getattr(self, "for_ir_info", None):
+            self.for_ir_info.setText(self.tr("for_ir_placeholder"))
         self.lab6_quads_table.setHorizontalHeaderLabels([
             self.tr("№"),
             self.tr("lab6_col_op"),
@@ -1502,10 +1525,116 @@ class Compiler(QMainWindow):
             poliz_lines.append(self.tr("lab6_poliz_empty"))
         self.lab6_poliz_view.setPlainText("\n".join(poliz_lines))
 
+    def _clear_for_ir_sections(self) -> None:
+        while self.for_ir_sections_layout.count():
+            item = self.for_ir_sections_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def _make_tac_table(self, rows: list) -> QTableWidget:
+        table = QTableWidget(len(rows), 4)
+        table.setHorizontalHeaderLabels([
+            self.tr("lab6_col_op"),
+            self.tr("lab6_col_arg1"),
+            self.tr("lab6_col_arg2"),
+            self.tr("lab6_col_result"),
+        ])
+        for col in range(4):
+            table.horizontalHeader().setSectionResizeMode(
+                col,
+                QHeaderView.ResizeMode.Stretch if col == 0 else QHeaderView.ResizeMode.ResizeToContents,
+            )
+        table.verticalHeader().setVisible(False)
+        table.setEditTriggers(QTableWidget.EditTrigger.NoEditTriggers)
+        table.setFont(QFont("Courier New", 9))
+        table.setAlternatingRowColors(True)
+        for row_idx, (op, arg1, arg2, result) in enumerate(rows):
+            for col_idx, value in enumerate((op, arg1, arg2, result)):
+                table.setItem(row_idx, col_idx, QTableWidgetItem(value))
+        table.resizeRowsToContents()
+        height = table.horizontalHeader().height()
+        for row in range(table.rowCount()):
+            height += table.rowHeight(row)
+        table.setMinimumHeight(min(height + 8, 320))
+        table.setMaximumHeight(height + 8)
+        return table
+
+    def _add_for_ir_section(self, title: str, description: str, rows: list) -> None:
+        title_label = QLabel(f"<b>{title}</b>")
+        title_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        self.for_ir_sections_layout.addWidget(title_label)
+        if description:
+            desc_label = QLabel(description)
+            desc_label.setWordWrap(True)
+            desc_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.for_ir_sections_layout.addWidget(desc_label)
+        self.for_ir_sections_layout.addWidget(self._make_tac_table(rows))
+        spacer = QFrame()
+        spacer.setFrameShape(QFrame.Shape.HLine)
+        spacer.setFrameShadow(QFrame.Shadow.Sunken)
+        self.for_ir_sections_layout.addWidget(spacer)
+
+    def _fill_for_ir_tab(self, program, has_errors: bool) -> None:
+        self._clear_for_ir_sections()
+        nodes = collect_for_nodes(program)
+        if not nodes:
+            self.for_ir_info.setText(self.tr("for_ir_no_for"))
+            return
+
+        built_any = False
+        for idx, node in enumerate(nodes):
+            raw, folded, final = build_for_ir_pipeline(node)
+            if not raw:
+                continue
+            built_any = True
+            if idx > 0:
+                sep = QLabel(self.tr("for_ir_multi_sep"))
+                sep.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                self.for_ir_sections_layout.addWidget(sep)
+
+            m = node.range_start.value if isinstance(node.range_start, IntLiteralNode) else "?"
+            n = node.range_end.value if isinstance(node.range_end, IntLiteralNode) else "?"
+            header = QLabel(
+                f"<b>{self.tr('for_ir_header').format(node.loop_var, m, n)}</b>"
+            )
+            header.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+            self.for_ir_sections_layout.addWidget(header)
+
+            if idx == 0:
+                status = self.tr("for_ir_status").format(len(raw), len(folded), len(final))
+                if has_errors:
+                    status += " " + self.tr("for_ir_other_errors")
+                self.for_ir_info.setText(status)
+
+            self._add_for_ir_section(
+                self.tr("for_ir_input"),
+                "",
+                tac_to_quad_rows(raw),
+            )
+            self._add_for_ir_section(
+                self.tr("for_ir_opt1"),
+                self.tr("for_ir_opt1_desc"),
+                tac_to_quad_rows(folded),
+            )
+            self._add_for_ir_section(
+                self.tr("for_ir_opt2"),
+                self.tr("for_ir_opt2_desc"),
+                tac_to_quad_rows(final),
+            )
+
+        if not built_any:
+            self.for_ir_info.setText(self.tr("for_ir_no_for"))
+            return
+
+        self.for_ir_sections_layout.addStretch(1)
+
     def run_analyzer(self):
         self.tokens_table.setRowCount(0)
         self.errors_table.setRowCount(0)
         self.ast_output.clear()
+        self._clear_for_ir_sections()
+        self.for_ir_info.setText(self.tr("for_ir_placeholder"))
         self.syntax_status_label.clear()
         self.syntax_error_count_label.clear()
 
@@ -1540,6 +1669,7 @@ class Compiler(QMainWindow):
         )
 
         all_errors = list(lex_errors) + list(syn_errors)
+        self._fill_for_ir_tab(program, bool(all_errors))
         for err in all_errors:
             self._append_syntax_error_row(err)
 
@@ -1569,17 +1699,17 @@ class Compiler(QMainWindow):
                 or lab6_result.get("lex_errors")
                 or lab6_result.get("syn_errors")
             ):
-                self.results_tabs.setCurrentIndex(3)
-            else:
                 self.results_tabs.setCurrentIndex(4)
+            else:
+                self.results_tabs.setCurrentIndex(5)
         elif n_err == 0:
             self.syntax_status_label.setText(self.tr("Синтаксических ошибок не обнаружено."))
             self.statusBar.showMessage(self.tr("Анализ завершён: ошибок нет"))
-            self.results_tabs.setCurrentIndex(1)
+            self.results_tabs.setCurrentIndex(2 if collect_for_nodes(program) else 1)
         else:
             self.syntax_status_label.setText(self.tr("Обнаружены ошибки. Отображены в таблице."))
             self.statusBar.showMessage(self.tr("Анализ завершён"))
-            self.results_tabs.setCurrentIndex(2)
+            self.results_tabs.setCurrentIndex(3)
 
     def _analysis_exp(self, exp: str) -> str:
         if len(exp) == 1 and exp in "(){};:=:":
